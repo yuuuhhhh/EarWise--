@@ -7,7 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from app.configuration import EXPERIMENT_PROTOCOL_ID, plan_fingerprint, randomization_for
 from app.recorder import Recorder, recover_sessions, atomic_json, EEG_FIELDS, LABEL_FIELDS
@@ -431,6 +431,24 @@ class RecorderTests(unittest.TestCase):
         result = self.recorder.finish(self.terminal(), False)
         self.assertEqual(result["session_status"], "save_failed")
         self.assertIn("持续积压", result["termination_reason"])
+
+    def test_short_writer_delay_does_not_discard_simulated_samples(self):
+        self.initialize()
+        self.recorder.queue.put((time.monotonic() - 3, "eeg", self.eeg()))
+        self.recorder.barrier()
+        self.assertEqual(len(self.read_rows("eeg_raw.csv")), 1)
+        self.assertFalse(self.failed.is_set())
+        result = self.recorder.finish(self.terminal("aborted"), False)
+        self.assertEqual(result["session_status"], "aborted")
+
+    def test_buffer_flush_avoids_disk_sync_until_requested(self):
+        recorder = Recorder(self.directory, copy.deepcopy(self.snapshot), self.on_error)
+        recorder._handles = [Mock(), Mock()]
+        with patch("app.recorder.os.fsync") as sync:
+            recorder._flush(sync=False)
+            sync.assert_not_called()
+            recorder._flush()
+            self.assertEqual(sync.call_count, 2)
 
     def test_disk_exception_is_visible_and_does_not_claim_completion(self):
         self.initialize()

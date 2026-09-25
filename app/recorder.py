@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import os
 import queue
 import threading
@@ -37,7 +38,7 @@ def atomic_json(path: Path, value: dict):
 
 class Recorder:
     def __init__(self, directory: Path, snapshot: dict, on_error: Callable,
-                 max_items: int = 20000, max_age_seconds: float = 2):
+                 max_items: int = 20000, max_age_seconds: float = 10):
         self.directory = directory
         self.snapshot = snapshot
         self.on_error = on_error
@@ -91,24 +92,37 @@ class Recorder:
             self._fail('写入队列已满，已停止本轮采集')
             raise OSError(self.error) from exc
 
-    def _flush(self):
+    def _flush(self, *, sync=True):
         for f in self._handles:
             f.flush()
-            os.fsync(f.fileno())
+        if sync:
+            started = time.monotonic()
+            for f in self._handles:
+                os.fsync(f.fileno())
+            elapsed = time.monotonic() - started
+            if elapsed >= 1:
+                logging.warning('EEG 磁盘同步耗时 %.2f 秒；待写队列 %d 条', elapsed, self.queue.qsize())
 
     def _run(self):
         last_flush = time.monotonic()
+        last_sync = last_flush
+        sync_interval_seconds = 5
         try:
             while True:
                 try:
                     queued_at, kind, row = self.queue.get(timeout=0.2)
                 except queue.Empty:
-                    if time.monotonic() - last_flush >= 1:
+                    now = time.monotonic()
+                    if now - last_sync >= sync_interval_seconds:
                         self._flush()
+                        last_flush = last_sync = time.monotonic()
+                    elif now - last_flush >= 1:
+                        self._flush(sync=False)
                         last_flush = time.monotonic()
                     continue
-                if time.monotonic() - queued_at > self.max_age_seconds:
-                    self._fail('写入队列持续积压，数据保存未能跟上采集')
+                queue_age = time.monotonic() - queued_at
+                if queue_age > self.max_age_seconds:
+                    self._fail(f'写入队列持续积压，数据保存未能跟上采集（等待 {queue_age:.1f} 秒，待写 {self.queue.qsize()} 条）')
                 if kind == 'close':
                     break
                 if kind == 'eeg':
@@ -123,8 +137,12 @@ class Recorder:
                     row['signal'].set()
                 elif kind == 'snapshot':
                     atomic_json(self.directory / 'config.json', row)
-                if kind == 'flush' or time.monotonic() - last_flush >= 1:
+                now = time.monotonic()
+                if kind == 'flush' or now - last_sync >= sync_interval_seconds:
                     self._flush()
+                    last_flush = last_sync = time.monotonic()
+                elif now - last_flush >= 1:
+                    self._flush(sync=False)
                     last_flush = time.monotonic()
             self._flush()
         except Exception as exc:

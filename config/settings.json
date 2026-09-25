@@ -12,7 +12,7 @@
   "page_heartbeat_seconds": 3,
   "video_timeout_seconds": 5,
   "queue_max_items": 20000,
-  "queue_max_age_seconds": 2,
+  "queue_max_age_seconds": 10,
   "uv_scale": 0.0240405,
   "uv_verified": false,
   "channel_mapping": {
