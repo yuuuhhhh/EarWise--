@@ -1,6 +1,8 @@
 # EarWise采集系统 · 数据字段字典（schema_version 1.0）
 
-每个 session 表示一个被试、一个 day、一个 round 的独立尝试，只有 `eeg_raw.csv`、`labels.csv`、`config.json` 三个正式结果文件。`mode=simulation` 的模拟记录位于 `simulation_data`；`mode=real` 的真实记录位于 `data`。两类数据不能合并当作同一实验来源。
+每个 session 表示一个被试、一个 day、一个 round 的独立尝试，只有 `eeg_raw.csv`、`labels.csv`、`config.json` 三个正式结果文件。当前协议 `earwise-3day-2round-4trial-v2` 共 3 天，每天 2 轮，每轮 4 个 trial 和 4 次量表，开头仅一次 30 秒基线。第 1 轮条件为 attention → relax → attention → relax，第 2 轮为 relax → attention → relax → attention。`mode=simulation` 的模拟记录位于 `simulation_data`；`mode=real` 的真实记录位于 `data`。两类数据不能合并当作同一实验来源。
+
+软件版本为 `1.1.0`，数据字段 `schema_version` 保持 `1.0`；素材清单 manifest schema 为 `2.0`。旧版每轮两 trial 的记录不迁移、不覆盖，也不计入当前协议的既往尝试；分析时必须结合 `experiment_protocol_id` 与 `trials`，不能仅凭相同 day/round 将新旧轮次混为一组。
 
 CSV 使用 UTF-8、固定表头、标准双引号转义和 `.` 小数点。不适用或未知值为空字段；JSON 对应值为 `null`。时间均含单位，UTC 字符串带时区。三文件的 `session_id` 一致。
 
@@ -44,8 +46,8 @@ CSV 使用 UTF-8、固定表头、标准双引号转义和 `.` 小数点。不�
 | `last_sample_row_index` | 可空整数 | 后端处理事件时最近收到的 EEG 行号；不是精确刺激起始样本 |
 | `stream_epoch_id` | 可空整数 | 当前连续流区段 |
 | `stage` | 可空字符串 | `baseline/attention/relax/transition/questionnaire/video_buffering` |
-| `trial_id` | 可空字符串 | 唯一 trial ID，评分据此关联刚结束的视频 |
-| `trial_order` | 可空整数 1 或 2 | 本轮 trial 顺序 |
+| `trial_id` | 可空字符串 | 唯一 trial ID；同轮重复条件的两个 trial 仍有不同 ID，评分据此关联刚结束的视频 |
+| `trial_order` | 可空整数 1–4 | 本轮 trial 顺序，每个 trial 对应一次量表 |
 | `condition` | 可空字符串 | `attention` 或 `relax`，与当前阶段分开表达 |
 | `video_id` | 可空字符串 | 稳定素材 ID，例如 `attention_01`、`relax_01` |
 | `video_order_in_trial` | 可空整数 1 | 每个 trial 只有一个视频 |
@@ -99,16 +101,17 @@ CSV 使用 UTF-8、固定表头、标准双引号转义和 `.` 小数点。不�
 
 | 字段或分组 | 内容 |
 |---|---|
-| `schema_version/software_version/python_version/platform` | 三文件格式、软件和运行环境版本 |
+| `schema_version/software_version/python_version/platform` | 三文件格式、软件和运行环境版本；当前数据字段 schema 1.0、软件 1.1.0 |
+| `experiment_protocol_id` | 当前为 `earwise-3day-2round-4trial-v2`；区分旧版两 trial 协议，避免仅按 day/round 混用历史记录 |
 | `dependency_versions` | 运行时 Tornado、Bleak 实际安装版本；完整开发环境见项目 requirements-lock.txt |
-| `session_id/subject_id/day/round` | 本次身份，subject_id 为保留前导零的字符串 |
+| `session_id/subject_id/day/round` | 本次身份，subject_id 为保留前导零的字符串，day 为 1–3，round 为 1–2 |
 | `attempt_number/retry_of_session_id` | 第几次尝试及关联前次 session |
 | `mode` | `real` 或 `simulation` |
 | `session_status` | `recording/completed/aborted/interrupted/save_failed` |
 | `started_at_utc/ended_at_utc/started_monotonic_ns/ended_monotonic_ns` | 起止 UTC 和进程单调时间，异常退出可能部分缺失 |
 | `termination_reason/current_stage` | 终止原因与最后阶段 |
 | `baseline_seconds/baseline_instruction` | 30 秒和“静息30s” |
-| `trials` | 实际顺序、唯一 trial_id、condition、video、是否开始/完成/提交量表 |
+| `trials` | 本轮四个 trial 的实际顺序（trial_order 1–4）、唯一 trial_id、condition、video、是否开始/完成/提交量表 |
 | `trials[].video` | `video_id/path/filename/url/duration_seconds/sha256/codecs`；sha256 对原文件字节计算。`size_bytes/mtime_ns/ctime_ns` 记录文件状态，用于识别预检后的素材变化 |
 | `questionnaires` | 本次程度/确信度题目及两端标签，选择值为整数 1–5 |
 | `audio_confirmed` | 操作人已在本页面确认视频声音可听见、音量合适 |
@@ -125,4 +128,4 @@ CSV 使用 UTF-8、固定表头、标准双引号转义和 `.` 小数点。不�
 | `files` | 正式结果三个文件名 |
 | `summary` | 实际行数、事件数、接收/唯一/重复/推定缺帧/歧义计数、量表提交数等结束摘要 |
 
-评分的唯一权威来源为 `labels.csv` 的 `RATING_SUBMITTED`，`trials` 只标记提交状态。分析前检查 `session_status`：`completed` 才是已通过软件保存完整性校验的正常全轮；其他状态保留的是未完成或保存异常记录。任何状态都不能替代人工实验质量判断。
+评分的唯一权威来源为 `labels.csv` 的 `RATING_SUBMITTED`，`trials` 只标记提交状态。当前协议正常完成时恰好有四条评分，逐一对应四个不同的 `trial_id`。分析前检查 `session_status`：`completed` 才是已通过软件保存完整性校验的正常全轮；其他状态保留的是未完成或保存异常记录。任何状态都不能替代人工实验质量判断。

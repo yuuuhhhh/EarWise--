@@ -13,6 +13,11 @@ from typing import BinaryIO
 from urllib.parse import quote
 
 
+EXPERIMENT_PROTOCOL_ID = "earwise-3day-2round-4trial-v2"
+TRIALS_PER_ROUND = 4
+ROUNDS_PER_DAY = 2
+
+
 class ConfigurationError(ValueError):
     """An actionable project configuration or media validation failure."""
 
@@ -136,8 +141,8 @@ def validate_subject(subject_id: str) -> str:
 def _day_round(day, round):
     if type(day) is not int or day not in (1, 2, 3):
         raise ConfigurationError("day 必须为整数 1、2 或 3")
-    if type(round) is not int or round not in (1, 2, 3, 4):
-        raise ConfigurationError("round 必须为整数 1、2、3 或 4")
+    if type(round) is not int or round not in range(1, ROUNDS_PER_DAY + 1):
+        raise ConfigurationError("round 必须为整数 1 或 2")
 
 
 def _media_path(root: Path, relative: str) -> Path:
@@ -159,24 +164,29 @@ def _media_path(root: Path, relative: str) -> Path:
 def validate_manifest(root: Path) -> list[dict]:
     root = Path(root)
     manifest = _json(root / "config" / "video_manifest.json")
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != "1.0":
-        raise ConfigurationError("video_manifest.json 必须为 schema_version=1.0 的对象")
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != "2.0":
+        raise ConfigurationError("video_manifest.json 必须为 schema_version=2.0 的对象")
     entries = manifest.get("trials")
     if not isinstance(entries, list) or len(entries) != 24:
-        raise ConfigurationError("视频清单必须包含 24 个 trial，覆盖全部 12 个 day × round，每 trial 一个视频")
+        raise ConfigurationError("视频清单必须包含 24 个 trial，覆盖全部 6 个 day × round，每 round 4 个 trial，每 trial 一个视频")
     validated, seen = [], set()
     for entry in entries:
         if not isinstance(entry, dict):
             raise ConfigurationError("视频清单 trial 必须为对象")
         day, round, condition = entry.get("day"), entry.get("round"), entry.get("condition")
+        trial_order = entry.get("trial_order")
         _day_round(day, round)
-        if condition not in ("attention", "relax"):
-            raise ConfigurationError(f"day {day} round {round} 的 condition 必须为 attention 或 relax")
-        key = (day, round, condition)
+        if type(trial_order) is not int or trial_order not in range(1, TRIALS_PER_ROUND + 1):
+            raise ConfigurationError(f"day {day} round {round} 的 trial_order 必须为整数 1、2、3 或 4")
+        key = (day, round, trial_order)
         if key in seen:
-            raise ConfigurationError(f"视频清单重复：day {day} round {round} {condition}")
+            raise ConfigurationError(f"视频清单重复：day {day} round {round} trial_order {trial_order}")
         seen.add(key)
-        index = (day - 1) * 4 + round if condition == "attention" else round
+        expected_condition = "attention" if (round + trial_order) % 2 == 0 else "relax"
+        if condition != expected_condition:
+            raise ConfigurationError(f"day {day} round {round} trial_order {trial_order} 的 condition 必须为 {expected_condition}")
+        pair_index = (round - 1) * 2 + (trial_order - 1) // 2 + 1
+        index = (day - 1) * 4 + pair_index if condition == "attention" else pair_index
         relative = f"{condition}_video/{index:02d}.mp4"
         video_id = f"{condition}_{index:02d}"
         video = entry.get("video")
@@ -185,9 +195,14 @@ def validate_manifest(root: Path) -> list[dict]:
         if video.get("filename") != f"{index:02d}.mp4":
             raise ConfigurationError(f"视频 {video_id} 的 filename 必须为 {index:02d}.mp4")
         _media_path(root, relative)
-        validated.append({"day": day, "round": round, "condition": condition,
+        validated.append({"day": day, "round": round, "trial_order": trial_order, "condition": condition,
                           "video": {"video_id": video_id, "path": relative,
                                     "filename": video["filename"], "url": "/media/" + quote(relative)}})
+    expected = {(day, round, trial_order) for day in (1, 2, 3)
+                for round in range(1, ROUNDS_PER_DAY + 1)
+                for trial_order in range(1, TRIALS_PER_ROUND + 1)}
+    if seen != expected:
+        raise ConfigurationError("视频清单必须完整覆盖 3 天、每天 2 个 round、每 round 4 个 trial")
     return validated
 
 
@@ -289,11 +304,11 @@ def _video_metadata(root: Path, video: dict, *, with_hash: bool) -> dict:
 
 def plan_for(root: Path, day: int, round: int) -> list[dict]:
     _day_round(day, round)
-    matched = {entry["condition"]: entry for entry in validate_manifest(root)
-               if entry["day"] == day and entry["round"] == round}
-    order = ("attention", "relax") if round % 2 else ("relax", "attention")
-    return [{"condition": condition, "video": _video_metadata(Path(root), matched[condition]["video"], with_hash=True)}
-            for condition in order]
+    matched = [entry for entry in validate_manifest(root)
+               if entry["day"] == day and entry["round"] == round]
+    return [{"condition": entry["condition"], "trial_order": entry["trial_order"],
+             "video": _video_metadata(Path(root), entry["video"], with_hash=True)}
+            for entry in sorted(matched, key=lambda trial: trial["trial_order"])]
 
 
 def media_catalog(root: Path) -> list[dict]:

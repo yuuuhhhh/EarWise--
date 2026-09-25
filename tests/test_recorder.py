@@ -9,6 +9,7 @@ import time
 import unittest
 from unittest.mock import Mock
 
+from app.configuration import EXPERIMENT_PROTOCOL_ID
 from app.recorder import Recorder, recover_sessions, atomic_json, EEG_FIELDS, LABEL_FIELDS
 
 
@@ -20,9 +21,12 @@ class RecorderTests(unittest.TestCase):
         self.failures = []
         self.failed = threading.Event()
         self.snapshot = dict(schema_version="1.0", session_id="session-test", subject_id="001",
+                             experiment_protocol_id=EXPERIMENT_PROTOCOL_ID, round=1,
                              session_status="recording", started_monotonic_ns=1000,
-                             trials=[dict(trial_id="t1", condition="attention", completed=True, rating_submitted=True),
-                                     dict(trial_id="t2", condition="relax", completed=True, rating_submitted=True)],
+                             trials=[dict(trial_id=f"t{index}", trial_order=index,
+                                          condition="attention" if index % 2 else "relax",
+                                          video={"video_id": f"video-{index}"},
+                                          completed=True, rating_submitted=True) for index in range(1, 5)],
                              summary={}, termination_reason="")
         self.recorder = None
 
@@ -51,21 +55,30 @@ class RecorderTests(unittest.TestCase):
     def event(self, kind, trial=None, **extra):
         value = dict(session_id="session-test", event_id=f"e-{time.monotonic_ns()}", event_type=kind,
                      trial_id=trial, details_json=json.dumps({"message": '保留中文，逗号,"引号"\n换行'}, ensure_ascii=False))
+        metadata = next((item for item in self.snapshot["trials"] if item["trial_id"] == trial), None)
+        if metadata:
+            value.update(trial_order=metadata["trial_order"], condition=metadata["condition"],
+                         video_id=metadata["video"]["video_id"], video_order_in_trial=1)
         value.update(extra)
         return value
 
-    def complete_rows(self, *, invalid_trial_end=False, invalid_score=False):
+    def complete_rows(self, *, invalid_trial_end=False, invalid_score=False, trial_count=4, transform=None):
         self.recorder.submit("eeg", self.eeg())
+        events = []
         for kind in ["SESSION_START", "BASELINE_START", "BASELINE_END"]:
-            self.recorder.submit("event", self.event(kind))
-        for index, condition in [(1, "attention"), (2, "relax")]:
-            trial = f"t{index}"
-            self.recorder.submit("event", self.event("TRIAL_START", trial))
-            self.recorder.submit("event", self.event("TRIAL_END", "t1" if invalid_trial_end else trial))
-            self.recorder.submit("event", self.event("RATING_SUBMITTED", trial, condition=condition,
-                                                     **{f"{condition}_score": 0 if invalid_score else 3,
-                                                        "confidence_score": 4}))
-        self.recorder.submit("event", self.event("SESSION_END"))
+            events.append(self.event(kind))
+        for index, metadata in enumerate(self.snapshot["trials"][:trial_count], 1):
+            trial, condition = metadata["trial_id"], metadata["condition"]
+            events.append(self.event("TRIAL_START", trial))
+            events.append(self.event("TRIAL_END", "t1" if invalid_trial_end else trial))
+            events.append(self.event("RATING_SUBMITTED", trial, condition=condition,
+                                     **{f"{condition}_score": 0 if invalid_score else index,
+                                        "confidence_score": 5 - index}))
+        events.append(self.event("SESSION_END"))
+        if transform:
+            events = transform(events)
+        for event in events:
+            self.recorder.submit("event", event)
 
     def read_rows(self, name):
         with (self.directory / name).open(encoding="utf-8", newline="") as source:
@@ -84,8 +97,123 @@ class RecorderTests(unittest.TestCase):
         labels = self.read_rows("labels.csv")
         self.assertEqual(json.loads(labels[0]["details_json"])["message"], '保留中文，逗号,"引号"\n换行')
         self.assertEqual(result["summary"]["actual_rows"], 1)
-        self.assertEqual(result["summary"]["event_rows"], 10)
+        self.assertEqual(result["summary"]["event_rows"], 16)
+        self.assertEqual(result["schema_version"], "1.0")
+        self.assertEqual(result["experiment_protocol_id"], EXPERIMENT_PROTOCOL_ID)
+        ratings = {row["trial_id"]: row for row in labels if row["event_type"] == "RATING_SUBMITTED"}
+        for index in range(1, 5):
+            condition = "attention" if index % 2 else "relax"
+            self.assertEqual(ratings[f"t{index}"][f"{condition}_score"], str(index))
+            self.assertEqual(ratings[f"t{index}"]["confidence_score"], str(5 - index))
+            self.assertEqual(ratings[f"t{index}"]["video_id"], f"video-{index}")
         self.assertEqual(self.failures, [])
+
+    def test_even_round_completes_with_relax_attention_relax_attention(self):
+        self.snapshot["round"] = 2
+        for trial in self.snapshot["trials"]:
+            trial["condition"] = "relax" if trial["trial_order"] % 2 else "attention"
+        self.initialize()
+        self.complete_rows()
+        self.assertEqual(self.recorder.finish(self.terminal(), True)["session_status"], "completed")
+
+    def test_only_two_finished_trials_cannot_complete_round(self):
+        self.initialize()
+        self.complete_rows(trial_count=2)
+        result = self.recorder.finish(self.terminal(), True)
+        self.assertEqual(result["session_status"], "save_failed")
+        self.assertIn("完整性", result["termination_reason"])
+
+    def test_two_trial_snapshot_cannot_bypass_four_trial_requirement(self):
+        self.snapshot["trials"] = self.snapshot["trials"][:2]
+        self.initialize()
+        self.complete_rows(trial_count=2)
+        result = self.recorder.finish(self.terminal(), True)
+        self.assertEqual(result["session_status"], "save_failed")
+        self.assertIn("trial 数量", result["termination_reason"])
+
+    def test_missing_third_or_fourth_trial_boundaries_or_rating_fails(self):
+        for trial_id in ("t3", "t4"):
+            for kind in ("TRIAL_START", "TRIAL_END", "RATING_SUBMITTED"):
+                with self.subTest(trial=trial_id, kind=kind):
+                    self.directory = self.directory.with_name(f"missing-{trial_id}-{kind}")
+                    self.initialize()
+                    self.complete_rows(transform=lambda events: [row for row in events
+                                       if (row["trial_id"], row["event_type"]) != (trial_id, kind)])
+                    self.assertEqual(self.recorder.finish(self.terminal(), True)["session_status"], "save_failed")
+
+    def test_snapshot_duplicate_identity_wrong_order_or_wrong_condition_fails(self):
+        variants = (
+            ("duplicate-trial", lambda trials: trials[2].update(trial_id="t1")),
+            ("duplicate-video", lambda trials: trials[2]["video"].update(video_id="video-1")),
+            ("wrong-order", lambda trials: trials[2].update(trial_order=1)),
+            ("wrong-condition", lambda trials: trials[2].update(condition="relax")),
+        )
+        original = copy.deepcopy(self.snapshot)
+        for name, mutate in variants:
+            with self.subTest(name=name):
+                self.directory = self.directory.with_name(name)
+                self.snapshot = copy.deepcopy(original)
+                self.initialize()
+                self.complete_rows()
+                terminal = self.terminal()
+                mutate(terminal["trials"])
+                self.assertEqual(self.recorder.finish(terminal, True)["session_status"], "save_failed")
+
+    def test_persisted_trial_metadata_cannot_point_to_other_same_condition_trial(self):
+        for kind in ("TRIAL_START", "TRIAL_END", "RATING_SUBMITTED"):
+            for field, value in (("trial_order", 1), ("video_id", "video-1"), ("condition", "relax")):
+                with self.subTest(kind=kind, field=field):
+                    self.directory = self.directory.with_name(f"wrong-{kind}-{field}")
+                    self.initialize()
+                    def change(events):
+                        for row in events:
+                            if row["event_type"] == kind and row["trial_id"] == "t3":
+                                row[field] = value
+                        return events
+                    self.complete_rows(transform=change)
+                    result = self.recorder.finish(self.terminal(), True)
+                    self.assertEqual(result["session_status"], "save_failed")
+                    self.assertIn("关联", result["termination_reason"])
+
+    def test_same_condition_trials_cannot_exchange_execution_order(self):
+        self.initialize()
+        def exchange(events):
+            # The two attention trials keep internally consistent metadata, but exchange places.
+            return events[:3] + events[9:12] + events[6:9] + events[3:6] + events[12:]
+        self.complete_rows(transform=exchange)
+        result = self.recorder.finish(self.terminal(), True)
+        self.assertEqual(result["session_status"], "save_failed")
+        self.assertIn("执行顺序", result["termination_reason"])
+
+    def test_rating_cannot_be_persisted_before_trial_end(self):
+        self.initialize()
+        def reorder(events):
+            events[10], events[11] = events[11], events[10]
+            return events
+        self.complete_rows(transform=reorder)
+        result = self.recorder.finish(self.terminal(), True)
+        self.assertEqual(result["session_status"], "save_failed")
+        self.assertIn("提交顺序", result["termination_reason"])
+
+    def test_unknown_protocol_cannot_be_marked_completed(self):
+        self.initialize()
+        self.complete_rows()
+        terminal = self.terminal()
+        terminal["experiment_protocol_id"] = "legacy-two-trial"
+        self.assertEqual(self.recorder.finish(terminal, True)["session_status"], "save_failed")
+
+    def test_round_three_and_four_cannot_be_marked_completed(self):
+        for rnd in (3, 4):
+            with self.subTest(round=rnd):
+                self.directory = self.directory.with_name(f"invalid-round-{rnd}")
+                self.snapshot["round"] = rnd
+                for trial in self.snapshot["trials"]:
+                    trial["condition"] = "attention" if (rnd + trial["trial_order"]) % 2 == 0 else "relax"
+                self.initialize()
+                self.complete_rows()
+                result = self.recorder.finish(self.terminal(), True)
+                self.assertEqual(result["session_status"], "save_failed")
+                self.assertIn("round 编号", result["termination_reason"])
 
     def test_barrier_persists_questionnaire_before_return(self):
         self.initialize()

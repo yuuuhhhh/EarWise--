@@ -14,7 +14,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from . import __version__
-from .configuration import load_settings, media_catalog, plan_for, validate_subject, validate_manifest
+from .configuration import (EXPERIMENT_PROTOCOL_ID, ROUNDS_PER_DAY, TRIALS_PER_ROUND,
+                            load_settings, media_catalog, plan_for, validate_subject, validate_manifest)
 from .device import RealDevice, SimulatedDevice
 from .protocol import FrameParser
 from .quality import QualityTracker, ALGORITHM_VERSION
@@ -243,8 +244,8 @@ class Controller:
     def identity(body):
         subject = validate_subject(body.get('subject_id', ''))
         day, rnd = body.get('day'), body.get('round')
-        if type(day) is not int or day not in (1, 2, 3) or type(rnd) is not int or rnd not in (1, 2, 3, 4):
-            raise ExperimentError('请选择合法的天数（1–3）和 round（1–4）')
+        if type(day) is not int or day not in (1, 2, 3) or type(rnd) is not int or rnd not in range(1, ROUNDS_PER_DAY + 1):
+            raise ExperimentError('请选择合法的天数（1–3）和 round（1–2）')
         return subject, day, rnd
 
     def attempts(self, subject, day, rnd):
@@ -255,6 +256,10 @@ class Controller:
         for path in parent.glob('*/config.json'):
             try:
                 value = json.loads(path.read_text(encoding='utf-8'))
+                # Round numbers were regrouped in v2. Old two-trial attempts
+                # must not count as completion or retry ancestry for this plan.
+                if value.get('experiment_protocol_id') != EXPERIMENT_PROTOCOL_ID:
+                    continue
                 result.append({**{k: value.get(k) for k in ('session_id', 'started_at_utc', 'attempt_number')}, 'status': value.get('session_status')})
             except (OSError, ValueError):
                 result.append({'session_id': path.parent.name, 'status': 'unreadable', 'started_at_utc': ''})
@@ -365,6 +370,8 @@ class Controller:
         if any(p['status'] == 'completed' for p in prior) and body.get('confirm_retry') is not True:
             raise ExperimentError('本轮已有完成记录，请确认重采；新记录不会覆盖原记录')
         plan = await asyncio.to_thread(plan_for, self.root, day, rnd)
+        if len(plan) != TRIALS_PER_ROUND or [item.get('trial_order') for item in plan] != list(range(1, TRIALS_PER_ROUND + 1)):
+            raise ExperimentError('当前协议要求每轮 4 个按顺序排列的 trial，请检查视频清单')
         catalog_by_id = {video['video_id']: video for video in self.catalog}
         for item in plan:
             video = item['video']
@@ -384,6 +391,7 @@ class Controller:
         snap = copy.deepcopy(self.settings)
         snap['algorithm_versions']['packet_loss'] = ALGORITHM_VERSION
         snap.update(session_id=session_id, subject_id=subject, day=day, round=rnd, attempt_number=len(prior)+1,
+                    experiment_protocol_id=EXPERIMENT_PROTOCOL_ID,
                     retry_of_session_id=prior[-1]['session_id'] if prior else None,
                     software_version=__version__, python_version=platform.python_version(), platform=platform.platform(),
                     dependency_versions={name: importlib.metadata.version(name) for name in ('tornado', 'bleak')},
@@ -408,6 +416,7 @@ class Controller:
         self._pending_failure = False
         self._failure_totals = None
         self.session = dict(session_id=session_id, subject_id=subject, day=day, round=rnd, controller_id=cid,
+                            experiment_protocol_id=EXPERIMENT_PROTOCOL_ID,
                             status='recording', stage='', trials=trials, trial_index=0, current_trial=None,
                             started_monotonic_ns=now, started_at_utc=self.utc(now), baseline_end_ns=now+int(30e9),
                             output_directory=str(directory), files=snap['files'], reason='')
@@ -532,10 +541,10 @@ class Controller:
             raise ExperimentError('评分写入失败，已停止本轮') from exc
         self.ratings[trial_id] = (score, confidence)
         trial['rating_submitted'] = True
-        if s['trial_index'] == 0:
+        if s['trial_index'] + 1 < len(s['trials']):
             self.event('STAGE_END')
             s['stage'] = ''
-            s['trial_index'] = 1
+            s['trial_index'] += 1
             self.next_trial()
         else:
             await self.finish('completed', '')

@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from app.controller import Controller, ExperimentError
+from app.configuration import EXPERIMENT_PROTOCOL_ID
 from app.device import RealDevice
 from app.protocol import encode_frame
 from app.quality import ALGORITHM_VERSION
@@ -38,10 +39,16 @@ def mock_catalog():
 
 
 def mock_plan(_root, day, rnd):
-    order = ("attention", "relax") if rnd % 2 else ("relax", "attention")
+    order = ("attention", "relax", "attention", "relax") if rnd % 2 else ("relax", "attention", "relax", "attention")
     catalog = {video["video_id"]: video for video in mock_catalog()}
-    return [dict(condition=condition, video=copy.deepcopy(catalog[f"{condition}_{((day-1)*4+rnd if condition == 'attention' else rnd):02}"]))
-            for condition in order]
+    result = []
+    for position, condition in enumerate(order):
+        index = (rnd - 1) * 2 + position // 2 + 1
+        if condition == "attention":
+            index += (day - 1) * 4
+        result.append(dict(trial_order=position + 1, condition=condition,
+                           video=copy.deepcopy(catalog[f"{condition}_{index:02}"])))
+    return result
 
 
 class ControllerTests(unittest.IsolatedAsyncioTestCase):
@@ -139,7 +146,8 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         return rating
 
     async def test_complete_odd_and_even_rounds_have_exact_three_auditable_files(self):
-        for rnd, order in ((1, ["attention", "relax"]), (2, ["relax", "attention"])):
+        for rnd, order in ((1, ["attention", "relax", "attention", "relax"]),
+                           (2, ["relax", "attention", "relax", "attention"])):
             with self.subTest(round=rnd):
                 await self.start(rnd)
                 await self.advance(29.75)
@@ -147,8 +155,13 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
                 await self.advance(.25)
                 self.assertEqual(self.controller.session["stage"], "transition")
                 self.assertEqual([trial["condition"] for trial in self.controller.session["trials"]], order)
-                for score in (2, 5):
+                scores = (2, 5, 1, 4)
+                for index, score in enumerate(scores):
                     await self.complete_trial(score)
+                    if index < 3:
+                        self.assertTrue(self.controller.recording)
+                        self.assertEqual(self.controller.session["stage"], "transition")
+                        self.assertEqual(self.controller.session["trial_index"], index + 1)
                 self.assertEqual(self.controller.session["status"], "completed")
                 directory = Path(self.controller.session["output_directory"])
                 self.assertEqual({p.name for p in directory.iterdir()}, {"eeg_raw.csv", "labels.csv", "config.json"})
@@ -158,17 +171,83 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(config["mode"], "simulation")
                 self.assertEqual(config["subject_id"], "001")
                 self.assertEqual(config["summary"]["actual_rows"], len(eeg))
-                self.assertEqual(config["summary"]["questionnaires_submitted"], 2)
+                self.assertEqual(config["summary"]["questionnaires_submitted"], 4)
+                self.assertEqual(config["experiment_protocol_id"], EXPERIMENT_PROTOCOL_ID)
+                self.assertEqual([t["trial_order"] for t in config["trials"]], [1, 2, 3, 4])
+                self.assertEqual(len({t["trial_id"] for t in config["trials"]}), 4)
+                self.assertTrue(all(t["completed"] and t["rating_submitted"] for t in config["trials"]))
+                for kind, count in (("BASELINE_START", 1), ("BASELINE_END", 1),
+                                    ("TRIAL_START", 4), ("TRIAL_END", 4), ("RATING_SUBMITTED", 4)):
+                    self.assertEqual(sum(row["event_type"] == kind for row in labels), count)
                 baseline_start = next(row for row in labels if row["event_type"] == "BASELINE_START")
                 baseline_end = next(row for row in labels if row["event_type"] == "BASELINE_END")
                 self.assertEqual(int(baseline_end["event_monotonic_ns"]) - int(baseline_start["event_monotonic_ns"]), 30_000_000_000)
                 self.assertLess(len(eeg), 7500)  # Baseline obeys elapsed time, never waits for a sample quota.
                 ratings = [row for row in labels if row["event_type"] == "RATING_SUBMITTED"]
                 self.assertEqual([row["condition"] for row in ratings], order)
-                for row in ratings:
-                    self.assertNotEqual(row[f"{row['condition']}_score"], "")
+                for index, row in enumerate(ratings):
+                    self.assertEqual(row[f"{row['condition']}_score"], str(scores[index]))
+                    self.assertEqual(row["trial_id"], config["trials"][index]["trial_id"])
+                    self.assertEqual(row["video_id"], config["trials"][index]["video"]["video_id"])
                     self.assertEqual(row["relax_score" if row["condition"] == "attention" else "attention_score"], "")
                     self.assertEqual(row["confidence_score"], "4")
+
+    async def test_only_new_rounds_one_and_two_are_accepted(self):
+        for rnd in (0, 3, 4, 5, True, 1.0, "1"):
+            with self.subTest(round=rnd):
+                with self.assertRaises(ExperimentError):
+                    await self.controller.action("preflight", self.body(subject_id="001", day=1, round=rnd))
+                with self.assertRaises(ExperimentError):
+                    await self.start(rnd=rnd)
+        self.assertIsNone(self.controller.recorder)
+
+    async def test_old_two_trial_completion_does_not_block_new_protocol(self):
+        directory = self.controller.data_root / "sub_001/day_01/round_01/legacy-two-trial"
+        directory.mkdir(parents=True)
+        legacy = {"session_id": "legacy-two-trial", "session_status": "completed", "attempt_number": 1,
+                  "started_at_utc": "2026-09-01T00:00:00+00:00", "trials": mock_plan(self.root, 1, 1)[:2]}
+        legacy_path = directory / "config.json"
+        legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+        before = legacy_path.read_bytes()
+        preflight = await self.controller.action("preflight", self.body(subject_id="001", day=1, round=1))
+        self.assertEqual(preflight["previous_attempts"], [])
+        self.assertEqual(len(preflight["plan"]), 4)
+        await self.start()
+        await self.controller.action("abort", self.body())
+        _, _, config = self.read_outputs()
+        self.assertEqual(config["attempt_number"], 1)
+        self.assertIsNone(config["retry_of_session_id"])
+        self.assertEqual(legacy_path.read_bytes(), before)
+
+    async def test_two_trials_are_only_half_a_round_and_abort_preserves_them(self):
+        await self.start()
+        await self.advance(30)
+        first_rating = await self.complete_trial(2)
+        await self.complete_trial(5)
+        third = self.controller.session["current_trial"]
+        self.assertEqual(third["trial_order"], 3)
+        self.assertEqual(third["condition"], "attention")
+        self.assertTrue(self.controller.recording)
+        # Retrying a past rating must not submit the new trial of the same condition.
+        await self.controller.action("rating", first_rating)
+        self.assertFalse(third["rating_submitted"])
+        fourth_id = self.controller.session["trials"][3]["trial_id"]
+        with self.assertRaises(ExperimentError):
+            await self.media("playing", 0, trial_id=fourth_id)
+        await self.controller.action("abort", self.body())
+        _, labels, config = self.read_outputs()
+        self.assertEqual(config["session_status"], "aborted")
+        self.assertEqual(config["summary"]["questionnaires_submitted"], 2)
+        self.assertEqual([trial["rating_submitted"] for trial in config["trials"]], [True, True, False, False])
+        self.assertEqual(sum(row["event_type"] == "BASELINE_START" for row in labels), 1)
+        self.assertEqual(sum(row["event_type"] == "RATING_SUBMITTED" for row in labels), 2)
+
+    async def test_outdated_two_trial_plan_cannot_start(self):
+        with patch("app.controller.plan_for", return_value=mock_plan(self.root, 1, 1)[:2]):
+            with self.assertRaisesRegex(ExperimentError, "4.*trial"):
+                await self.start()
+        self.assertFalse(self.controller.recording)
+        self.assertIsNone(self.controller.recorder)
 
     async def test_formal_start_resets_preview_counters_and_rejects_parallel_owner(self):
         for _ in range(20):
@@ -426,8 +505,8 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
     async def test_completed_retry_requires_confirmation_and_preserves_old_files(self):
         first, _ = await self.start()
         await self.advance(30)
-        await self.complete_trial()
-        await self.complete_trial()
+        for _ in range(4):
+            await self.complete_trial()
         old_directory = Path(self.controller.session["output_directory"])
         old_bytes = {path.name: path.read_bytes() for path in old_directory.iterdir()}
         with self.assertRaises(ExperimentError):

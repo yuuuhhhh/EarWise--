@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from app.configuration import EXPERIMENT_PROTOCOL_ID, ROUNDS_PER_DAY, TRIALS_PER_ROUND
+
 EEG_FIELDS = ['session_id', 'sample_row_index', 'stream_epoch_id', 'notification_id',
               'frame_in_notification', 'device_seq', 'received_at_utc',
               'received_monotonic_ns', 'elapsed_ms', 'channel_0_raw', 'channel_1_raw',
@@ -188,16 +190,40 @@ class Recorder:
         if len(events) != self.event_count:
             raise OSError('标签行数校验失败')
         if complete:
+            trials = snapshot.get('trials', [])
+            if snapshot.get('experiment_protocol_id') != EXPERIMENT_PROTOCOL_ID or len(trials) != TRIALS_PER_ROUND:
+                raise OSError('实验协议或 trial 数量校验失败：每轮必须完成 4 个 trial')
+            trial_ids = [trial.get('trial_id') for trial in trials]
+            video_ids = [trial.get('video', {}).get('video_id') for trial in trials]
+            if (any(not isinstance(value, str) or not value for value in trial_ids + video_ids)
+                    or len(set(trial_ids)) != TRIALS_PER_ROUND or len(set(video_ids)) != TRIALS_PER_ROUND):
+                raise OSError('trial 身份或视频身份校验失败：每个 trial 和视频必须唯一')
+            rnd = snapshot.get('round')
+            if type(rnd) is not int or rnd not in range(1, ROUNDS_PER_DAY + 1):
+                raise OSError('round 编号校验失败')
+            conditions = ('attention', 'relax') if rnd % 2 else ('relax', 'attention')
+            for index, trial in enumerate(trials, 1):
+                if type(trial.get('trial_order')) is not int or trial['trial_order'] != index or trial.get('condition') != conditions[(index - 1) % 2]:
+                    raise OSError('trial 顺序或交替条件校验失败')
             types = [e[0] for e in events]
             required = {'SESSION_START': 1, 'SESSION_END': 1, 'BASELINE_START': 1,
-                        'BASELINE_END': 1, 'TRIAL_START': 2, 'TRIAL_END': 2,
-                        'RATING_SUBMITTED': 2}
+                        'BASELINE_END': 1, 'TRIAL_START': TRIALS_PER_ROUND,
+                        'TRIAL_END': TRIALS_PER_ROUND, 'RATING_SUBMITTED': TRIALS_PER_ROUND}
             if not rows or any(types.count(k) != count for k, count in required.items()):
                 raise OSError('完整性校验失败：缺少样本、阶段或问卷')
-            for trial in snapshot['trials']:
+            expected_order = ['SESSION_START', 'BASELINE_START', 'BASELINE_END']
+            expected_order += ['TRIAL_START', 'TRIAL_END', 'RATING_SUBMITTED'] * TRIALS_PER_ROUND
+            expected_order.append('SESSION_END')
+            if [kind for kind in types if kind in required] != expected_order:
+                raise OSError('阶段边界或问卷提交顺序校验失败')
+            for trial in trials:
                 for kind in ('TRIAL_START', 'TRIAL_END', 'RATING_SUBMITTED'):
                     if events.count((kind, trial['trial_id'])) != 1:
                         raise OSError('trial 边界或问卷关联校验失败')
+                    row = next(row for row in persisted_labels if row['event_type'] == kind and row['trial_id'] == trial['trial_id'])
+                    if (row['trial_order'] != str(trial['trial_order']) or row['condition'] != trial['condition']
+                            or row['video_id'] != trial['video']['video_id'] or row['video_order_in_trial'] != '1'):
+                        raise OSError('trial 顺序、条件或视频关联校验失败')
                 rating = next(row for row in persisted_labels if row['event_type'] == 'RATING_SUBMITTED' and row['trial_id'] == trial['trial_id'])
                 condition = trial['condition']
                 other = 'relax' if condition == 'attention' else 'attention'
@@ -205,6 +231,9 @@ class Recorder:
                     raise OSError('量表条件或不适用评分字段校验失败')
                 if rating[f'{condition}_score'] not in ('1','2','3','4','5') or rating['confidence_score'] not in ('1','2','3','4','5'):
                     raise OSError('持久化量表评分校验失败')
+            for kind in ('TRIAL_START', 'TRIAL_END', 'RATING_SUBMITTED'):
+                if [trial_id for event_type, trial_id in events if event_type == kind] != trial_ids:
+                    raise OSError('trial 执行顺序校验失败')
 
 
 def recover_sessions(data_root: Path):

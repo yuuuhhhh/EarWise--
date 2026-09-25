@@ -6,7 +6,10 @@ import struct
 import tempfile
 import unittest
 
-from app.configuration import ConfigurationError, load_settings, media_catalog, plan_for, validate_manifest, validate_subject
+from app.configuration import (
+    EXPERIMENT_PROTOCOL_ID, ROUNDS_PER_DAY, TRIALS_PER_ROUND, ConfigurationError,
+    load_settings, media_catalog, plan_for, validate_manifest, validate_subject,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,22 +76,41 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigurationError, "left"):
             load_settings(self.root)
 
-    def test_all_twelve_rounds_use_exactly_one_video_per_condition_and_correct_order(self):
+    def test_all_six_rounds_use_four_trials_in_correct_order_with_exact_media(self):
+        self.assertEqual(EXPERIMENT_PROTOCOL_ID, "earwise-3day-2round-4trial-v2")
+        self.assertEqual(ROUNDS_PER_DAY, 2)
+        self.assertEqual(TRIALS_PER_ROUND, 4)
         self.assertEqual(len(validate_manifest(self.root)), 24)
         attention_ids = []
         for day in (1, 2, 3):
-            for round_number in (1, 2, 3, 4):
+            for round_number in (1, 2):
                 plan = plan_for(self.root, day, round_number)
-                expected = ["attention", "relax"] if round_number % 2 else ["relax", "attention"]
+                expected = ["attention", "relax", "attention", "relax"] if round_number % 2 else ["relax", "attention", "relax", "attention"]
                 self.assertEqual([trial["condition"] for trial in plan], expected)
-                self.assertEqual(len(plan), 2)
-                by_condition = {trial["condition"]: trial["video"] for trial in plan}
-                attention_index = (day - 1) * 4 + round_number
-                self.assertEqual(by_condition["attention"]["path"], f"attention_video/{attention_index:02d}.mp4")
-                self.assertEqual(by_condition["relax"]["path"], f"relax_video/{round_number:02d}.mp4")
-                attention_ids.append(by_condition["attention"]["video_id"])
+                self.assertEqual([trial["trial_order"] for trial in plan], [1, 2, 3, 4])
+                self.assertEqual(len(plan), 4)
+                # Explicit source indices ensure merging retains both original video pairs.
+                attention_indices = (1, 2) if round_number == 1 else (3, 4)
+                for position, trial in enumerate(plan):
+                    condition = expected[position]
+                    index = attention_indices[position // 2]
+                    if condition == "attention":
+                        index += (day - 1) * 4
+                        attention_ids.append(trial["video"]["video_id"])
+                    self.assertEqual(trial["video"]["path"], f"{condition}_video/{index:02d}.mp4")
+                    self.assertEqual(trial["video"]["video_id"], f"{condition}_{index:02d}")
+                    self.assertEqual(trial["video"]["filename"], f"{index:02d}.mp4")
+                self.assertEqual(sum(trial["condition"] == "attention" for trial in plan), 2)
+                self.assertEqual(sum(trial["condition"] == "relax" for trial in plan), 2)
         self.assertEqual(len(set(attention_ids)), 12)
         self.assertEqual(len(media_catalog(self.root)), 16)
+
+    def test_manifest_file_order_does_not_change_trial_order_or_remove_repeated_conditions(self):
+        self.edit("video_manifest.json", lambda data: data["trials"].reverse())
+        plan = plan_for(self.root, 1, 2)
+        self.assertEqual([trial["trial_order"] for trial in plan], [1, 2, 3, 4])
+        self.assertEqual([trial["video"]["video_id"] for trial in plan],
+                         ["relax_03", "attention_03", "relax_04", "attention_04"])
 
     def test_missing_media_names_the_exact_file(self):
         (self.root / "attention_video/12.mp4").unlink()
@@ -105,6 +127,49 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigurationError, "重复"):
             validate_manifest(self.root)
 
+    def test_duplicate_trial_order_rejected_even_with_different_condition(self):
+        self.edit("video_manifest.json", lambda data: data["trials"][1].update(trial_order=1))
+        with self.assertRaisesRegex(ConfigurationError, "重复"):
+            validate_manifest(self.root)
+
+    def test_missing_trial_rejected(self):
+        self.edit("video_manifest.json", lambda data: data["trials"].pop())
+        with self.assertRaisesRegex(ConfigurationError, "24 个 trial"):
+            validate_manifest(self.root)
+
+    def test_trial_order_is_required_and_must_be_integer_one_to_four(self):
+        original = json.loads((self.root / "config/video_manifest.json").read_text(encoding="utf-8-sig"))
+        for value in (None, 0, 5, True, 1.0, "1"):
+            with self.subTest(trial_order=value):
+                manifest = copy.deepcopy(original)
+                manifest["trials"][0]["trial_order"] = value
+                (self.root / "config/video_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+                with self.assertRaisesRegex(ConfigurationError, "trial_order"):
+                    validate_manifest(self.root)
+
+    def test_incorrect_condition_sequence_rejected(self):
+        self.edit("video_manifest.json", lambda data: data["trials"][2].update(condition="relax"))
+        with self.assertRaisesRegex(ConfigurationError, "condition 必须为 attention"):
+            validate_manifest(self.root)
+
+    def test_old_manifest_schema_is_rejected(self):
+        self.edit("video_manifest.json", lambda data: data.update(schema_version="1.0"))
+        with self.assertRaisesRegex(ConfigurationError, "schema_version=2.0"):
+            validate_manifest(self.root)
+
+    def test_wrong_source_video_pair_is_rejected(self):
+        self.edit("video_manifest.json", lambda data: data["trials"][2]["video"].update(
+            filename="01.mp4", video_id="attention_01", path="attention_video/01.mp4"))
+        with self.assertRaisesRegex(ConfigurationError, "attention_video/02.mp4"):
+            validate_manifest(self.root)
+
+    def test_old_round_three_and_four_are_rejected_in_manifest(self):
+        for round_number in (3, 4):
+            with self.subTest(round=round_number):
+                self.edit("video_manifest.json", lambda data: data["trials"][0].update(round=round_number))
+                with self.assertRaisesRegex(ConfigurationError, "round 必须为整数 1 或 2"):
+                    validate_manifest(self.root)
+
     def test_subject_is_safe_and_preserves_leading_zeroes(self):
         self.assertEqual(validate_subject(" 001 "), "001")
         self.assertEqual(validate_subject("被试_03"), "被试_03")
@@ -115,7 +180,7 @@ class ConfigurationTests(unittest.TestCase):
                     validate_subject(invalid)
 
     def test_day_and_round_cannot_be_coerced_from_unsafe_types(self):
-        for day, round_number in ((0, 1), (4, 1), (1, 0), (1, 5), (True, 1), (1, False), ("1", 1), (1, 1.0)):
+        for day, round_number in ((0, 1), (4, 1), (1, 0), (1, 3), (1, 4), (1, 5), (True, 1), (1, False), ("1", 1), (1, 1.0)):
             with self.subTest(day=day, round=round_number):
                 with self.assertRaises(ConfigurationError):
                     plan_for(self.root, day, round_number)
