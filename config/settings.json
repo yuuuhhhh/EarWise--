@@ -1,0 +1,88 @@
+{
+  "schema_version": "1.0",
+  "software_version": "1.0.0",
+  "baseline_seconds": 30,
+  "baseline_instruction": "静息30s",
+  "nominal_sample_rate": 250,
+  "window_seconds": 5,
+  "data_timeout_seconds": 1,
+  "sequence_max_delta": 32,
+  "sequence_trust_seconds": 0.5,
+  "saturation_ratio": 0.98,
+  "page_heartbeat_seconds": 3,
+  "video_timeout_seconds": 5,
+  "queue_max_items": 20000,
+  "queue_max_age_seconds": 2,
+  "uv_scale": 0.0240405,
+  "uv_verified": false,
+  "channel_mapping": {
+    "channel_1": null,
+    "verified": false,
+    "channel_0": null
+  },
+  "validations": {
+    "saturation_verified": false,
+    "sample_rate_verified": false,
+    "commands_verified": false
+  },
+  "commands": [
+    "b"
+  ],
+  "target_name": "MindBridge-v3.11",
+  "service_uuid": "0000ae30-0000-1000-8000-00805f9b34fb",
+  "notify_uuid": "0000ae02-0000-1000-8000-00805f9b34fb",
+  "write_uuid": "0000ae01-0000-1000-8000-00805f9b34fb",
+  "questionnaires": {
+    "relax": {
+      "confidence_high_label": "非常确信",
+      "question": "你刚刚的放松程度是多少？",
+      "high_label": "非常放松",
+      "confidence_low_label": "非常不确信",
+      "confidence_question": "你对刚刚放松程度评分的确信度是多少？",
+      "low_label": "非常不放松"
+    },
+    "attention": {
+      "confidence_high_label": "非常确信",
+      "question": "你刚刚的专心程度是多少？",
+      "high_label": "非常专心",
+      "confidence_low_label": "非常不确信",
+      "confidence_question": "你对刚刚专心程度评分的确信度是多少？",
+      "low_label": "非常不专心"
+    }
+  },
+  "adc_bits": 24,
+  "candidate_adc_gain": 12,
+  "uv_unit": "uV",
+  "quality_refresh_seconds": 1,
+  "protocol": {
+    "raw_offsets": [
+      [
+        2,
+        5
+      ],
+      [
+        5,
+        8
+      ]
+    ],
+    "signed": true,
+    "endianness": "big",
+    "tail_high_nibble_hex": "C0",
+    "sequence_bits": 8,
+    "crc_verified": false,
+    "header_hex": "A0",
+    "sequence_offset": 1,
+    "frame_bytes": 33
+  },
+  "algorithm_versions": {
+    "packet_loss": "seq8-conservative-window-v1",
+    "saturation": "raw-adc-threshold-v1"
+  },
+  "verification_notes": {
+    "channel_mapping": "通道 0/1 左右耳归属待实机或接线资料确认",
+    "sample_rate": "250 Hz 为参考脚本名义值，待实机确认",
+    "commands": "小写 b 为参考脚本原始模式候选命令；未验证时连接不自动发送",
+    "saturation": "24 位有符号范围 98% 为工程初值，待核对削顶及特殊状态码",
+    "uv_scale": "0.288486 / 12 为候选系数，单位与增益待验证；未验证则 CSV 留空"
+  }
+}

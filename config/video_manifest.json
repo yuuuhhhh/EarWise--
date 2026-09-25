@@ -1,0 +1,245 @@
+{
+  "schema_version": "1.0",
+  "trials": [
+    {
+      "day": 1,
+      "round": 1,
+      "condition": "attention",
+      "video": {
+        "filename": "01.mp4",
+        "video_id": "attention_01",
+        "path": "attention_video/01.mp4"
+      }
+    },
+    {
+      "day": 1,
+      "round": 1,
+      "condition": "relax",
+      "video": {
+        "filename": "01.mp4",
+        "video_id": "relax_01",
+        "path": "relax_video/01.mp4"
+      }
+    },
+    {
+      "day": 1,
+      "round": 2,
+      "condition": "attention",
+      "video": {
+        "filename": "02.mp4",
+        "video_id": "attention_02",
+        "path": "attention_video/02.mp4"
+      }
+    },
+    {
+      "day": 1,
+      "round": 2,
+      "condition": "relax",
+      "video": {
+        "filename": "02.mp4",
+        "video_id": "relax_02",
+        "path": "relax_video/02.mp4"
+      }
+    },
+    {
+      "day": 1,
+      "round": 3,
+      "condition": "attention",
+      "video": {
+        "filename": "03.mp4",
+        "video_id": "attention_03",
+        "path": "attention_video/03.mp4"
+      }
+    },
+    {
+      "day": 1,
+      "round": 3,
+      "condition": "relax",
+      "video": {
+        "filename": "03.mp4",
+        "video_id": "relax_03",
+        "path": "relax_video/03.mp4"
+      }
+    },
+    {
+      "day": 1,
+      "round": 4,
+      "condition": "attention",
+      "video": {
+        "filename": "04.mp4",
+        "video_id": "attention_04",
+        "path": "attention_video/04.mp4"
+      }
+    },
+    {
+      "day": 1,
+      "round": 4,
+      "condition": "relax",
+      "video": {
+        "filename": "04.mp4",
+        "video_id": "relax_04",
+        "path": "relax_video/04.mp4"
+      }
+    },
+    {
+      "day": 2,
+      "round": 1,
+      "condition": "attention",
+      "video": {
+        "filename": "05.mp4",
+        "video_id": "attention_05",
+        "path": "attention_video/05.mp4"
+      }
+    },
+    {
+      "day": 2,
+      "round": 1,
+      "condition": "relax",
+      "video": {
+        "filename": "01.mp4",
+        "video_id": "relax_01",
+        "path": "relax_video/01.mp4"
+      }
+    },
+    {
+      "day": 2,
+      "round": 2,
+      "condition": "attention",
+      "video": {
+        "filename": "06.mp4",
+        "video_id": "attention_06",
+        "path": "attention_video/06.mp4"
+      }
+    },
+    {
+      "day": 2,
+      "round": 2,
+      "condition": "relax",
+      "video": {
+        "filename": "02.mp4",
+        "video_id": "relax_02",
+        "path": "relax_video/02.mp4"
+      }
+    },
+    {
+      "day": 2,
+      "round": 3,
+      "condition": "attention",
+      "video": {
+        "filename": "07.mp4",
+        "video_id": "attention_07",
+        "path": "attention_video/07.mp4"
+      }
+    },
+    {
+      "day": 2,
+      "round": 3,
+      "condition": "relax",
+      "video": {
+        "filename": "03.mp4",
+        "video_id": "relax_03",
+        "path": "relax_video/03.mp4"
+      }
+    },
+    {
+      "day": 2,
+      "round": 4,
+      "condition": "attention",
+      "video": {
+        "filename": "08.mp4",
+        "video_id": "attention_08",
+        "path": "attention_video/08.mp4"
+      }
+    },
+    {
+      "day": 2,
+      "round": 4,
+      "condition": "relax",
+      "video": {
+        "filename": "04.mp4",
+        "video_id": "relax_04",
+        "path": "relax_video/04.mp4"
+      }
+    },
+    {
+      "day": 3,
+      "round": 1,
+      "condition": "attention",
+      "video": {
+        "filename": "09.mp4",
+        "video_id": "attention_09",
+        "path": "attention_video/09.mp4"
+      }
+    },
+    {
+      "day": 3,
+      "round": 1,
+      "condition": "relax",
+      "video": {
+        "filename": "01.mp4",
+        "video_id": "relax_01",
+        "path": "relax_video/01.mp4"
+      }
+    },
+    {
+      "day": 3,
+      "round": 2,
+      "condition": "attention",
+      "video": {
+        "filename": "10.mp4",
+        "video_id": "attention_10",
+        "path": "attention_video/10.mp4"
+      }
+    },
+    {
+      "day": 3,
+      "round": 2,
+      "condition": "relax",
+      "video": {
+        "filename": "02.mp4",
+        "video_id": "relax_02",
+        "path": "relax_video/02.mp4"
+      }
+    },
+    {
+      "day": 3,
+      "round": 3,
+      "condition": "attention",
+      "video": {
+        "filename": "11.mp4",
+        "video_id": "attention_11",
+        "path": "attention_video/11.mp4"
+      }
+    },
+    {
+      "day": 3,
+      "round": 3,
+      "condition": "relax",
+      "video": {
+        "filename": "03.mp4",
+        "video_id": "relax_03",
+        "path": "relax_video/03.mp4"
+      }
+    },
+    {
+      "day": 3,
+      "round": 4,
+      "condition": "attention",
+      "video": {
+        "filename": "12.mp4",
+        "video_id": "attention_12",
+        "path": "attention_video/12.mp4"
+      }
+    },
+    {
+      "day": 3,
+      "round": 4,
+      "condition": "relax",
+      "video": {
+        "filename": "04.mp4",
+        "video_id": "relax_04",
+        "path": "relax_video/04.mp4"
+      }
+    }
+  ]
+}

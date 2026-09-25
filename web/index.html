@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f5f7f8">
+  <title>EarWise采集系统</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <a class="brand" href="/" aria-label="EarWise采集系统首页">
+      <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 28 28" fill="none"><path d="M3 14h5l3-7 5 15 3-8h6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      <span>EarWise采集系统<span class="brand-sub">实验采集工作台</span></span>
+    </a>
+    <div class="header-meta"><span id="mode-badge" class="badge">正在连接服务</span><span class="local-label">本地运行 · 数据保存在此电脑</span></div>
+  </header>
+
+  <main class="shell">
+    <div class="page-heading"><div><div class="eyebrow">EEG EXPERIMENT / 数据采集</div><h1 id="page-title">开始一次新的采集</h1><p id="page-description">登记本轮信息，检查设备与素材后开始。</p></div><div id="identity" class="identity" hidden></div></div>
+    <div id="simulation-notice" class="simulation-notice" hidden><strong>模拟模式</strong><span>当前 EEG 为程序生成，仅用于流程与保存验证，不可作为真实实验数据。</span></div>
+    <div id="connection-warning" class="notice error" role="alert" hidden>无法连接本地服务。正式采集将由后端按页面心跳超时规则中断，请检查服务终端。</div>
+    <div id="message" class="notice" role="status" hidden></div>
+
+    <div class="workspace">
+      <section class="experiment-column" aria-label="实验流程">
+        <ol class="stepper" aria-label="本轮步骤">
+          <li data-step="registration"><span>01</span>登记与检查</li>
+          <li data-step="baseline"><span>02</span>基线采集</li>
+          <li data-step="trial"><span>03</span>视频与量表</li>
+          <li data-step="complete"><span>04</span>保存完成</li>
+        </ol>
+        <div id="main-content"></div>
+      </section>
+
+      <aside class="quality-panel" aria-label="实时设备状态">
+        <div class="panel-heading"><h2>设备与信号</h2><span class="live-label"><i id="live-dot"></i>每秒更新</span></div>
+        <div class="device-status"><span id="device-icon" class="status-icon" aria-hidden="true">○</span><div><strong id="device-status">等待连接</strong><p id="data-status">暂无数据</p></div></div>
+        <p id="device-detail" class="detail-line"></p>
+        <div class="status-row"><span>采集状态</span><strong id="recording-status">未开始</strong></div>
+        <div class="quality-divider"></div>
+        <div class="quality-title"><h3>通道饱和率</h3><span>按配置阈值估计</span></div>
+        <div class="channel-grid">
+          <div class="metric"><span id="channel-0-label">通道 0</span><strong id="saturation-0">—</strong></div>
+          <div class="metric"><span id="channel-1-label">通道 1</span><strong id="saturation-1">—</strong></div>
+        </div>
+        <p id="mapping-note" class="metric-note">左右耳映射待确认</p>
+        <div class="loss-card"><div><span>共享丢包率估计</span><small>左右通道共用</small></div><strong id="loss-rate">—</strong></div>
+        <p class="metric-note">基于设备序号估计；未知缺口无法由序号准确还原。</p>
+        <div class="window-info"><span id="window-label">最近 5 秒滑动窗口</span><span id="last-received">暂无有效数据</span></div>
+        <div id="gap-notice" class="notice caution compact" hidden>存在未知缺口，无法准确估计。</div>
+        <div class="quality-divider"></div>
+        <div class="capture-note"><span aria-hidden="true">ⓘ</span><p>量表中的专心度、放松度和确信度均由被试本人填写。</p></div>
+        <button id="abort-button" class="button danger-outline full-width" hidden>中止本轮</button>
+        <div id="readonly-note" class="notice caution compact" hidden>此页面仅供查看。当前采集由另一页面控制。</div>
+      </aside>
+    </div>
+    <footer class="page-footer"><span>两路原始 EEG · 连续采集 · 软件级事件标记</span><span>每轮独立保存 3 个数据文件</span></footer>
+  </main>
+
+  <dialog id="abort-dialog" class="confirm-dialog"><h2>确认中止本轮？</h2><p>将停止当前实验并保存已采集内容，标记为“主动中止”。再次尝试会创建新记录，并重新进行 30 秒基线。</p><div class="dialog-actions"><button id="cancel-abort" class="button secondary">继续采集</button><button id="confirm-abort" class="button danger">确认中止</button></div></dialog>
+  <div id="preload-bin" hidden aria-hidden="true"></div>
+</body>
+</html>
