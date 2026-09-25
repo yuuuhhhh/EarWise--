@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from . import __version__
-from .configuration import (EXPERIMENT_PROTOCOL_ID, ROUNDS_PER_DAY, TRIALS_PER_ROUND,
+from .configuration import (EXPERIMENT_PROTOCOL_ID, TOTAL_ROUNDS, TRIALS_PER_ROUND,
                             load_settings, media_catalog, plan_for, plan_fingerprint, randomization_for,
                             validate_subject, validate_manifest)
 from .device import RealDevice, SimulatedDevice
@@ -151,7 +151,7 @@ class Controller:
                 continue
             s = self.session
             row = dict(frame, **{k: info[k] for k in ('frame_status', 'stream_epoch_id')})
-            row.update(session_id=s['session_id'], sample_row_index=self.row_index,
+            row.update(session_id=s['session_id'], subject_id=s['subject_id'], round=s['round'], sample_row_index=self.row_index,
                        notification_id=self.notification_id, frame_in_notification=index,
                        received_at_utc=self.utc(now), received_monotonic_ns=now,
                        elapsed_ms=(now - s['started_monotonic_ns']) / 1e6)
@@ -181,7 +181,8 @@ class Controller:
                 audit = {k: client.get(k) for k in ('client_event_id', 'client_performance_ms', 'media_position_ms')}
                 audit['sync_uncertainty_ms'] = sync['rtt_ms'] / 2
         trial = s.get('current_trial')
-        row = dict(session_id=s['session_id'], event_id=str(uuid.uuid4()), event_type=kind,
+        row = dict(session_id=s['session_id'], subject_id=s['subject_id'], round=s['round'],
+                   event_id=str(uuid.uuid4()), event_type=kind,
                    event_time_utc=self.utc(event_ns), event_monotonic_ns=event_ns,
                    elapsed_ms=(event_ns - s['started_monotonic_ns']) / 1e6,
                    server_received_monotonic_ns=received, last_sample_row_index=self.row_index - 1 if self.row_index else None,
@@ -244,22 +245,29 @@ class Controller:
     @staticmethod
     def identity(body):
         subject = validate_subject(body.get('subject_id', ''))
-        day, rnd = body.get('day'), body.get('round', 1)
-        if type(day) is not int or day not in (1, 2, 3) or type(rnd) is not int or rnd not in range(1, ROUNDS_PER_DAY + 1):
-            raise ExperimentError('请选择合法的天数（1–3）；每天仅采集一轮，round 只能为 1')
-        return subject, day, rnd
+        if 'day' in body:
+            raise ExperimentError('不再使用 day 字段，请刷新页面并选择 Round 1–3')
+        rnd = body.get('round')
+        if type(rnd) is not int or rnd not in range(1, TOTAL_ROUNDS + 1):
+            raise ExperimentError('请选择合法的轮次（Round 1–3）')
+        return subject, rnd
 
-    def attempts(self, subject, day, rnd):
-        parent = self.data_root / f'sub_{subject}' / f'day_{day:02}' / f'round_{rnd:02}'
+    def attempts(self, subject, rnd):
+        parent = self.data_root / f'sub_{subject}' / f'round_{rnd:02}'
         if not parent.resolve().is_relative_to(self.data_root.resolve()):
             raise ExperimentError('保存路径不合法')
         result = []
         for path in parent.glob('*/config.json'):
             try:
                 value = json.loads(path.read_text(encoding='utf-8'))
-                # Earlier protocols used different daily videos and round counts.
+                # Earlier protocols used different identities and directory layouts.
                 # Do not treat those attempts as completion or retry ancestry.
-                if value.get('experiment_protocol_id') != EXPERIMENT_PROTOCOL_ID:
+                if (not isinstance(value, dict) or value.get('experiment_protocol_id') != EXPERIMENT_PROTOCOL_ID
+                        or value.get('schema_version') != '2.0'):
+                    continue
+                if (value.get('round') != rnd or type(value.get('round')) is not int
+                        or not isinstance(value.get('subject_id'), str)
+                        or value['subject_id'].casefold() != subject.casefold() or 'day' in value):
                     continue
                 result.append({**{k: value.get(k) for k in ('session_id', 'started_at_utc', 'attempt_number')}, 'status': value.get('session_status')})
             except (OSError, ValueError):
@@ -277,11 +285,11 @@ class Controller:
         if not isinstance(cid, str) or not 8 <= len(cid) <= 100:
             raise ExperimentError('页面标识无效，请刷新设备检查页')
         if name == 'preflight':
-            subject, day, rnd = self.identity(body)
-            plan = await asyncio.to_thread(plan_for, self.root, day, rnd, subject_id=subject)
-            return dict(plan=plan, plan_id=plan_fingerprint(subject, day, plan),
-                        randomization=randomization_for(subject, day),
-                        previous_attempts=self.attempts(subject, day, rnd), errors=list(self.preflight_errors))
+            subject, rnd = self.identity(body)
+            plan = await asyncio.to_thread(plan_for, self.root, rnd, subject_id=subject)
+            return dict(plan=plan, plan_id=plan_fingerprint(subject, rnd, plan),
+                        randomization=randomization_for(subject, rnd),
+                        previous_attempts=self.attempts(subject, rnd), errors=list(self.preflight_errors))
         if name == 'browser_probe':
             probes = body.get('videos', [])
             valid = {}
@@ -359,7 +367,7 @@ class Controller:
             return {'session_id': self.start_requests[request_key]}
         if self.recording or (self.session and self.session['status'] == 'saving'):
             raise ExperimentError('已有会话正在采集或保存')
-        subject, day, rnd = self.identity(body)
+        subject, rnd = self.identity(body)
         errors = self.readiness_errors()
         if errors:
             raise ExperimentError('；'.join(errors))
@@ -369,16 +377,16 @@ class Controller:
             raise ExperimentError('请先完成本页面全部素材播放兼容性检查')
         if cid not in self.syncs:
             raise ExperimentError('请先完成浏览器时钟同步')
-        prior = self.attempts(subject, day, rnd)
+        prior = self.attempts(subject, rnd)
         if any(p['status'] == 'completed' for p in prior) and body.get('confirm_retry') is not True:
             raise ExperimentError('本轮已有完成记录，请确认重采；新记录不会覆盖原记录')
-        plan = await asyncio.to_thread(plan_for, self.root, day, rnd, subject_id=subject)
+        plan = await asyncio.to_thread(plan_for, self.root, rnd, subject_id=subject)
         if len(plan) != TRIALS_PER_ROUND or [item.get('trial_order') for item in plan] != list(range(1, TRIALS_PER_ROUND + 1)):
             raise ExperimentError('当前协议要求每轮 4 个按顺序排列的 trial，请检查视频清单')
-        plan_id = plan_fingerprint(subject, day, plan)
+        plan_id = plan_fingerprint(subject, rnd, plan)
         if body.get('plan_id') != plan_id:
-            raise ExperimentError('当天计划尚未检查或已经变化，请重新检查计划后再开始')
-        randomization = randomization_for(subject, day)
+            raise ExperimentError('本轮计划尚未检查或已经变化，请重新检查计划后再开始')
+        randomization = randomization_for(subject, rnd)
         catalog_by_id = {video['video_id']: video for video in self.catalog}
         for item in plan:
             video = item['video']
@@ -394,10 +402,10 @@ class Controller:
         session_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S') + '_' + uuid.uuid4().hex[:12]
         trials = [dict(trial_id=f'{session_id}_t{i+1}', trial_order=i+1, condition=p['condition'], video=p['video'],
                        started=False, completed=False, rating_submitted=False) for i, p in enumerate(plan)]
-        directory = self.data_root / f'sub_{subject}' / f'day_{day:02}' / f'round_{rnd:02}' / session_id
+        directory = self.data_root / f'sub_{subject}' / f'round_{rnd:02}' / session_id
         snap = copy.deepcopy(self.settings)
         snap['algorithm_versions']['packet_loss'] = ALGORITHM_VERSION
-        snap.update(session_id=session_id, subject_id=subject, day=day, round=rnd, attempt_number=len(prior)+1,
+        snap.update(schema_version='2.0', session_id=session_id, subject_id=subject, round=rnd, attempt_number=len(prior)+1,
                     experiment_protocol_id=EXPERIMENT_PROTOCOL_ID,
                     plan_id=plan_id, randomization=copy.deepcopy(randomization),
                     retry_of_session_id=prior[-1]['session_id'] if prior else None,
@@ -423,7 +431,7 @@ class Controller:
         self.last_heartbeat_ns = now
         self._pending_failure = False
         self._failure_totals = None
-        self.session = dict(session_id=session_id, subject_id=subject, day=day, round=rnd, controller_id=cid,
+        self.session = dict(session_id=session_id, subject_id=subject, round=rnd, controller_id=cid,
                             experiment_protocol_id=EXPERIMENT_PROTOCOL_ID,
                             plan_id=plan_id, randomization=copy.deepcopy(randomization),
                             status='recording', stage='', trials=trials, trial_index=0, current_trial=None,

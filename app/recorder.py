@@ -12,11 +12,11 @@ from typing import Callable
 
 from app.configuration import EXPERIMENT_PROTOCOL_ID, TRIALS_PER_ROUND, plan_fingerprint, randomization_for
 
-EEG_FIELDS = ['session_id', 'sample_row_index', 'stream_epoch_id', 'notification_id',
+EEG_FIELDS = ['session_id', 'subject_id', 'round', 'sample_row_index', 'stream_epoch_id', 'notification_id',
               'frame_in_notification', 'device_seq', 'received_at_utc',
               'received_monotonic_ns', 'elapsed_ms', 'channel_0_raw', 'channel_1_raw',
               'channel_0_uv', 'channel_1_uv', 'frame_status', 'original_frame_hex']
-LABEL_FIELDS = ['session_id', 'event_id', 'event_type', 'event_time_utc',
+LABEL_FIELDS = ['session_id', 'subject_id', 'round', 'event_id', 'event_type', 'event_time_utc',
                 'event_monotonic_ns', 'elapsed_ms', 'server_received_monotonic_ns',
                 'client_event_id', 'client_performance_ms', 'sync_uncertainty_ms',
                 'last_sample_row_index', 'stream_epoch_id', 'stage', 'trial_id',
@@ -171,10 +171,22 @@ class Recorder:
         expected = {'eeg_raw.csv', 'labels.csv', 'config.json'}
         if {p.name for p in self.directory.iterdir()} != expected:
             raise OSError('会话文件数量校验失败')
+        if snapshot.get('schema_version') != '2.0' or 'day' in snapshot:
+            raise OSError('数据 schema 或旧 day 字段校验失败：新版仅使用 round')
+        rnd = snapshot.get('round')
+        if type(rnd) is not int or rnd not in (1, 2, 3):
+            raise OSError('round 编号校验失败：必须为整数 1、2 或 3')
+        subject = snapshot.get('subject_id')
+        if not isinstance(subject, str) or not subject:
+            raise OSError('被试身份校验失败')
+        identity = {key: str(snapshot[key]) for key in ('session_id', 'subject_id', 'round')}
         rows = 0
         with (self.directory / 'eeg_raw.csv').open(encoding='utf-8', newline='') as f:
-            for row in csv.DictReader(f):
-                if row['session_id'] != snapshot['session_id'] or int(row['sample_row_index']) != rows:
+            reader = csv.DictReader(f)
+            if reader.fieldnames != EEG_FIELDS:
+                raise OSError('原始数据表头校验失败')
+            for row in reader:
+                if any(row[key] != value for key, value in identity.items()) or int(row['sample_row_index']) != rows:
                     raise OSError('原始数据身份或行号校验失败')
                 rows += 1
         if rows != self.row_count:
@@ -182,8 +194,11 @@ class Recorder:
         events = []
         persisted_labels = []
         with (self.directory / 'labels.csv').open(encoding='utf-8', newline='') as f:
-            for row in csv.DictReader(f):
-                if row['session_id'] != snapshot['session_id']:
+            reader = csv.DictReader(f)
+            if reader.fieldnames != LABEL_FIELDS:
+                raise OSError('标签表头校验失败')
+            for row in reader:
+                if any(row[key] != value for key, value in identity.items()):
                     raise OSError('标签身份校验失败')
                 events.append((row['event_type'], row['trial_id']))
                 persisted_labels.append(row)
@@ -198,12 +213,7 @@ class Recorder:
             if (any(not isinstance(value, str) or not value for value in trial_ids + video_ids)
                     or len(set(trial_ids)) != TRIALS_PER_ROUND or len(set(video_ids)) != TRIALS_PER_ROUND):
                 raise OSError('trial 身份或视频身份校验失败：每个 trial 和视频必须唯一')
-            rnd, day = snapshot.get('round'), snapshot.get('day')
-            if type(rnd) is not int or rnd != 1:
-                raise OSError('round 编号校验失败')
-            if type(day) is not int or day not in (1, 2, 3):
-                raise OSError('day 编号校验失败')
-            randomization = randomization_for(snapshot.get('subject_id'), day)
+            randomization = randomization_for(subject, rnd)
             if snapshot.get('randomization') != randomization:
                 raise OSError('随机顺序元数据校验失败')
             first = randomization['first_condition']
@@ -214,14 +224,14 @@ class Recorder:
                 condition = trial['condition']
                 video_index = (index - 1) // 2 + 1
                 if condition == 'attention':
-                    video_index += (day - 1) * 2
+                    video_index += (rnd - 1) * 2
                 video = trial['video']
                 if (video.get('video_id') != f'{condition}_{video_index:02d}'
                         or video.get('path') != f'{condition}_video/{video_index:02d}.mp4'
                         or video.get('filename') != f'{video_index:02d}.mp4'):
-                    raise OSError('当天视频素材或同条件视频顺序校验失败')
+                    raise OSError('本轮视频素材或同条件视频顺序校验失败')
             plan = [{key: trial[key] for key in ('condition', 'trial_order', 'video')} for trial in trials]
-            if snapshot.get('plan_id') != plan_fingerprint(snapshot['subject_id'], day, plan):
+            if snapshot.get('plan_id') != plan_fingerprint(subject, rnd, plan):
                 raise OSError('播放计划指纹校验失败')
             types = [e[0] for e in events]
             required = {'SESSION_START': 1, 'SESSION_END': 1, 'BASELINE_START': 1,
@@ -260,7 +270,9 @@ def recover_sessions(data_root: Path):
     if not data_root.exists():
         return recovered
     from datetime import datetime, timezone
-    for path in data_root.glob('sub_*/day_*/round_*/*/config.json'):
+    paths = list(data_root.glob('sub_*/round_*/*/config.json'))
+    paths += list(data_root.glob('sub_*/day_*/round_*/*/config.json'))
+    for path in sorted(paths):
         try:
             snapshot = json.loads(path.read_text(encoding='utf-8'))
             if snapshot.get('session_status') != 'recording':
@@ -271,10 +283,17 @@ def recover_sessions(data_root: Path):
             # Recovery cannot fabricate a previous-process monotonic timestamp.
             label = path.parent / 'labels.csv'
             if label.exists():
+                # Preserve the original schema, including legacy recordings. New
+                # identity columns must never shift values under an old header.
+                with label.open(encoding='utf-8', newline='') as f:
+                    fields = next(csv.reader(f), None)
+                if not fields or 'session_id' not in fields or 'event_type' not in fields:
+                    raise OSError('标签表头缺失，无法安全追加中断事件')
                 with label.open('a', encoding='utf-8', newline='') as f:
-                    writer = csv.DictWriter(f, LABEL_FIELDS)
+                    writer = csv.DictWriter(f, fields, extrasaction='ignore')
                     import uuid
-                    writer.writerow({'session_id': snapshot['session_id'], 'event_id': str(uuid.uuid4()),
+                    identity = {key: snapshot.get(key, '') for key in ('session_id', 'subject_id', 'round', 'day')}
+                    writer.writerow({**identity, 'event_id': str(uuid.uuid4()),
                                      'event_type': 'SESSION_INTERRUPTED', 'event_time_utc': snapshot['ended_at_utc'],
                                      'details_json': json.dumps({'reason': reason, 'recovered_on_startup': True}, ensure_ascii=False)})
                     f.flush()

@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 from app.configuration import (
-    EXPERIMENT_PROTOCOL_ID, ROUNDS_PER_DAY, TRIALS_PER_ROUND, ConfigurationError,
+    EXPERIMENT_PROTOCOL_ID, TOTAL_ROUNDS, TRIALS_PER_ROUND, ConfigurationError,
     load_settings, media_catalog, plan_fingerprint, plan_for, randomization_for,
     validate_manifest, validate_subject,
 )
@@ -79,22 +79,25 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigurationError, "left"):
             load_settings(self.root)
 
-    def test_all_three_days_use_four_trials_with_the_exact_daily_media(self):
-        self.assertEqual(EXPERIMENT_PROTOCOL_ID, "earwise-3day-1round-4trial-randomstart-v3")
-        self.assertEqual(ROUNDS_PER_DAY, 1)
+    def test_all_three_rounds_use_four_trials_with_the_exact_round_media(self):
+        self.assertEqual(EXPERIMENT_PROTOCOL_ID, "earwise-3round-4trial-randomstart-v4")
+        self.assertEqual(TOTAL_ROUNDS, 3)
         self.assertEqual(TRIALS_PER_ROUND, 4)
-        self.assertEqual(len(validate_manifest(self.root)), 12)
+        manifest = validate_manifest(self.root)
+        self.assertEqual(len(manifest), 12)
+        self.assertTrue(all("day" not in entry for entry in manifest))
+        self.assertEqual({entry["round"] for entry in manifest}, {1, 2, 3})
         attention_ids = []
-        for day in (1, 2, 3):
-            plan = plan_for(self.root, day, subject_id="001")
-            first = randomization_for("001", day)["first_condition"]
+        for round_number in (1, 2, 3):
+            plan = plan_for(self.root, round_number, subject_id="001")
+            first = randomization_for("001", round_number)["first_condition"]
             other = "relax" if first == "attention" else "attention"
             self.assertEqual([trial["condition"] for trial in plan], [first, other, first, other])
             self.assertEqual([trial["trial_order"] for trial in plan], [1, 2, 3, 4])
             self.assertEqual(len(plan), 4)
             for condition in ("attention", "relax"):
                 matching = [trial for trial in plan if trial["condition"] == condition]
-                indices = ((day - 1) * 2 + 1, day * 2) if condition == "attention" else (1, 2)
+                indices = ((round_number - 1) * 2 + 1, round_number * 2) if condition == "attention" else (1, 2)
                 self.assertEqual(len(matching), 2)
                 for trial, index in zip(matching, indices):
                     self.assertEqual(trial["video"]["path"], f"{condition}_video/{index:02d}.mp4")
@@ -112,18 +115,19 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(plan, expected)
         self.assertEqual([trial["trial_order"] for trial in plan], [1, 2, 3, 4])
         self.assertEqual([trial["video"]["video_id"] for trial in plan],
-                         ["relax_01", "attention_01", "relax_02", "attention_02"])
+                         ["attention_01", "relax_01", "attention_02", "relax_02"])
 
     def test_random_start_is_stable_for_normalized_identity_and_has_both_directions(self):
-        day_one = randomization_for("001", 1)
-        self.assertEqual(day_one, {"method": "sha256-subject-day-first-condition-v1",
-                                  "seed": "9baafb3c1a28f46276116122467ae19afeef0fa27b9b9bc27f9ea1166cc048f3",
-                                  "first_condition": "relax", "retry_policy": "reuse-subject-day"})
-        self.assertEqual(randomization_for(" 001 ", 1), day_one)
+        round_one = randomization_for("001", 1)
+        self.assertEqual(round_one, {"method": "sha256-subject-round-first-condition-v1",
+                                    "seed": "cdf0365debbf5e5d19c670a0bafc21f531ea59eda65df86990484f6f884e2eca",
+                                    "first_condition": "attention", "retry_policy": "reuse-subject-round"})
+        self.assertEqual(randomization_for(" 001 ", 1), round_one)
         self.assertEqual(plan_for(self.root, 1, subject_id=" 001 "), plan_for(self.root, 1, subject_id="001"))
         self.assertEqual(randomization_for("001", 2)["first_condition"], "attention")
-        self.assertNotEqual(randomization_for("002", 1)["seed"], day_one["seed"])
-        self.assertEqual(len({randomization_for("001", day)["seed"] for day in (1, 2, 3)}), 3)
+        self.assertEqual(randomization_for("001", 3)["first_condition"], "relax")
+        self.assertNotEqual(randomization_for("002", 1)["seed"], round_one["seed"])
+        self.assertEqual(len({randomization_for("001", round_number)["seed"] for round_number in (1, 2, 3)}), 3)
         self.assertEqual({randomization_for(str(subject), 1)["first_condition"] for subject in range(20)},
                          {"attention", "relax"})
 
@@ -158,13 +162,13 @@ class ConfigurationTests(unittest.TestCase):
                 changed[0]["video"][key] = "changed"
                 self.assertNotEqual(plan_fingerprint("001", 1, changed), fingerprint)
 
-    def test_randomization_rejects_invalid_identity_and_day(self):
-        for subject, day in (("../x", 1), ("", 1), ("001", 0), ("001", 4), ("001", True), ("001", "1")):
-            with self.subTest(subject=subject, day=day):
+    def test_randomization_rejects_invalid_identity_and_round(self):
+        for subject, round_number in (("../x", 1), ("", 1), ("001", 0), ("001", 4), ("001", True), ("001", "1")):
+            with self.subTest(subject=subject, round=round_number):
                 with self.assertRaises(ConfigurationError):
-                    randomization_for(subject, day)
+                    randomization_for(subject, round_number)
                 with self.assertRaises(ConfigurationError):
-                    plan_fingerprint(subject, day, [])
+                    plan_fingerprint(subject, round_number, [])
         with self.assertRaises(TypeError):
             plan_for(self.root, 1)
 
@@ -223,8 +227,15 @@ class ConfigurationTests(unittest.TestCase):
             validate_manifest(self.root)
 
     def test_old_manifest_schema_is_rejected(self):
-        self.edit("video_manifest.json", lambda data: data.update(schema_version="1.0"))
-        with self.assertRaisesRegex(ConfigurationError, "schema_version=3.0"):
+        for schema in ("1.0", "2.0", "3.0"):
+            with self.subTest(schema=schema):
+                self.edit("video_manifest.json", lambda data: data.update(schema_version=schema))
+                with self.assertRaisesRegex(ConfigurationError, "schema_version=4.0"):
+                    validate_manifest(self.root)
+
+    def test_new_manifest_cannot_keep_legacy_day_field(self):
+        self.edit("video_manifest.json", lambda data: data["trials"][0].update(day=1))
+        with self.assertRaisesRegex(ConfigurationError, "不再使用 day"):
             validate_manifest(self.root)
 
     def test_wrong_source_video_pair_is_rejected(self):
@@ -233,11 +244,11 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigurationError, "attention_video/02.mp4"):
             validate_manifest(self.root)
 
-    def test_all_removed_rounds_are_rejected_in_manifest(self):
-        for round_number in (2, 3, 4):
+    def test_round_must_be_integer_one_to_three_in_manifest(self):
+        for round_number in (None, 0, 4, True, False, "1", 1.0):
             with self.subTest(round=round_number):
                 self.edit("video_manifest.json", lambda data: data["trials"][0].update(round=round_number))
-                with self.assertRaisesRegex(ConfigurationError, "round 必须为整数 1"):
+                with self.assertRaisesRegex(ConfigurationError, "round 必须为整数 1、2 或 3"):
                     validate_manifest(self.root)
 
     def test_subject_is_safe_and_preserves_leading_zeroes(self):
@@ -249,11 +260,17 @@ class ConfigurationTests(unittest.TestCase):
                 with self.assertRaises(ConfigurationError):
                     validate_subject(invalid)
 
-    def test_day_and_round_cannot_be_coerced_from_unsafe_types(self):
-        for day, round_number in ((0, 1), (4, 1), (1, 0), (1, 2), (1, 3), (1, 4), (1, 5), (True, 1), (1, False), ("1", 1), (1, 1.0)):
-            with self.subTest(day=day, round=round_number):
+    def test_round_cannot_be_coerced_from_unsafe_types(self):
+        for round_number in (None, 0, 4, 5, True, False, "1", 1.0):
+            with self.subTest(round=round_number):
                 with self.assertRaises(ConfigurationError):
-                    plan_for(self.root, day, round_number, subject_id="001")
+                    plan_for(self.root, round_number, subject_id="001")
+
+    def test_old_day_round_plan_signature_is_rejected(self):
+        with self.assertRaises(TypeError):
+            plan_for(self.root, 1, 1, subject_id="001")
+        with self.assertRaises(TypeError):
+            plan_for(self.root, day=1, subject_id="001")
 
     def test_media_metadata_sha256_and_cache_invalidation(self):
         video = next(trial["video"] for trial in plan_for(self.root, 1, subject_id="001")

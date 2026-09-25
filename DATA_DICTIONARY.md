@@ -1,10 +1,10 @@
-# EarWise采集系统 · 数据字段字典（schema_version 1.0）
+# EarWise采集系统 · 数据字段字典（schema_version 2.0）
 
-每个 session 表示一个被试、一个 day 的独立采集尝试，只有 `eeg_raw.csv`、`labels.csv`、`config.json` 三个正式结果文件。当前协议 `earwise-3day-1round-4trial-randomstart-v3` 共 3 天，每天 1 轮、4 个 trial（2 个 attention、2 个 relax）和 4 次量表，开头仅一次 30 秒基线。随机决定首个条件，之后交替，因此只有 attention → relax → attention → relax 和 relax → attention → relax → attention 两种顺序。三天合计 3 轮、3 次基线、12 个 trial（6 个 attention、6 个 relax）和 12 份量表。`mode=simulation` 的模拟记录位于 `simulation_data`；`mode=real` 的真实记录位于 `data`。两类数据不能合并当作同一实验来源。
+每个 session 表示一个被试、一个 round 的独立采集尝试，只有 `eeg_raw.csv`、`labels.csv`、`config.json` 三个正式结果文件。当前协议 `earwise-3round-4trial-randomstart-v4` 共 3 轮，每轮 4 个 trial（2 个 attention、2 个 relax）和 4 次量表，开头仅一次 30 秒基线。随机决定首个条件，之后交替，因此只有 attention → relax → attention → relax 和 relax → attention → relax → attention 两种顺序。三轮合计 3 次基线、12 个 trial（6 个 attention、6 个 relax）和 12 份量表。可按每天一轮安排实验，轮次不代表日历日期，也不要求连续三天采集。`mode=simulation` 的模拟记录位于 `simulation_data`；`mode=real` 的真实记录位于 `data`。两类数据不能合并当作同一实验来源。
 
-软件版本为 `1.2.0`，数据字段 `schema_version` 保持 `1.0`；素材清单 manifest schema 为 `3.0`。界面不再选择或显示 round，目录继续保留 `round_01`，JSON 的 `round` 固定为 `1`。旧版每轮两 trial 以及每天两轮四 trial 的记录均不迁移、不覆盖，也不计入当前协议的既往尝试；分析时必须结合 `experiment_protocol_id` 与 `trials`，不能仅凭相同 day/round 将新旧轮次混为一组。
+软件版本为 `1.3.0`，新会话数据字段 `schema_version` 为 `2.0`；素材清单 manifest schema 为 `4.0`，输入配置 `config/settings.json` 的 schema 仍为 `1.0`。界面、API、素材清单、CSV 和 JSON 统一使用 `round=1–3`；新会话不含 `day` 字段。保存路径为 `data/sub_001/round_01/<session_id>/`（模拟时根目录为 `simulation_data`），所选轮次决定 `round_01/02/03`，不再有 `day_XX` 层。所有旧协议数据均不迁移、不覆盖，也不计入当前协议的既往尝试；只有遗留未完成会话会按原格式追加中断收尾，旧表头不变。分析时必须结合 `schema_version`、`experiment_protocol_id` 与 `trials` 区分新旧记录。
 
-CSV 使用 UTF-8、固定表头、标准双引号转义和 `.` 小数点。不适用或未知值为空字段；JSON 对应值为 `null`。时间均含单位，UTC 字符串带时区。三文件的 `session_id` 一致。
+CSV 使用 UTF-8、固定表头、标准双引号转义和 `.` 小数点。不适用或未知值为空字段；JSON 对应值为 `null`。时间均含单位，UTC 字符串带时区。三文件的 `session_id`、`subject_id`、`round` 一致；两份 CSV 的前三列依次为 `session_id,subject_id,round`。
 
 ## eeg_raw.csv
 
@@ -13,6 +13,8 @@ CSV 使用 UTF-8、固定表头、标准双引号转义和 `.` 小数点。不�
 | 字段 | 类型 / 单位 | 含义 |
 |---|---|---|
 | `session_id` | 字符串 | 本轮尝试唯一标识 |
+| `subject_id` | 字符串 | 被试编号，保留前导零及原字母大小写 |
+| `round` | 整数 1–3 | 本次采集所属轮次，与目录、事件和 config.json 一致 |
 | `sample_row_index` | 整数，从 0 开始 | 本文件连续保存行号；不是设备采样编号 |
 | `stream_epoch_id` | 整数 | 连续流区段标识；断连或歧义区间后换段 |
 | `notification_id` | 整数 | 主机接到的 BLE 通知编号 |
@@ -34,7 +36,10 @@ CSV 使用 UTF-8、固定表头、标准双引号转义和 `.` 小数点。不�
 
 | 字段 | 类型 / 单位 | 含义 |
 |---|---|---|
-| `session_id`、`event_id` | 字符串 | 会话 ID、唯一事件 ID |
+| `session_id` | 字符串 | 本轮尝试唯一标识 |
+| `subject_id` | 字符串 | 被试编号，保留前导零及原字母大小写 |
+| `round` | 整数 1–3 | 本次采集所属轮次；所有事件均明确标记轮次 |
+| `event_id` | 字符串 | 唯一事件 ID |
 | `event_type` | 字符串 | 见下方事件表 |
 | `event_time_utc` | ISO 8601 | 事件统一 UTC 时刻 |
 | `event_monotonic_ns` | 可空整数 / 纳秒 | 后端统一时基；前端事件使用校时映射值 |
@@ -101,11 +106,11 @@ CSV 使用 UTF-8、固定表头、标准双引号转义和 `.` 小数点。不�
 
 | 字段或分组 | 内容 |
 |---|---|
-| `schema_version/software_version/python_version/platform` | 三文件格式、软件和运行环境版本；当前数据字段 schema 1.0、软件 1.2.0 |
-| `experiment_protocol_id` | 当前为 `earwise-3day-1round-4trial-randomstart-v3`；区分旧版两 trial 和每天两轮四 trial 协议，避免仅按 day/round 混用历史记录 |
+| `schema_version/software_version/python_version/platform` | 三文件格式、软件和运行环境版本；当前数据字段 schema 2.0、软件 1.3.0 |
+| `experiment_protocol_id` | 当前为 `earwise-3round-4trial-randomstart-v4`；区分所有旧协议，避免把旧 day/round 记录直接当作新 round 记录 |
 | `dependency_versions` | 运行时 Tornado、Bleak 实际安装版本；完整开发环境见项目 requirements-lock.txt |
-| `session_id/subject_id/day/round` | 本次身份，subject_id 为保留前导零的字符串，day 为 1–3，round 固定为 1 |
-| `plan_id` | 预检计划的 SHA-256 标识，绑定协议、被试、天数及四个 trial 的实际计划与素材元数据；开始请求须携带并通过一致性检查 |
+| `session_id/subject_id/round` | 本次身份，subject_id 为保留前导零的字符串，round 为 1–3；新会话没有 day 字段 |
+| `plan_id` | 预检计划的 SHA-256 标识，绑定协议、被试、轮次及四个 trial 的实际计划与素材元数据；开始请求须携带并通过一致性检查 |
 | `randomization` | 首条件分配依据，包含 `method/seed/first_condition/retry_policy`，详见下文 |
 | `attempt_number/retry_of_session_id` | 第几次尝试及关联前次 session |
 | `mode` | `real` 或 `simulation` |
@@ -136,13 +141,13 @@ CSV 使用 UTF-8、固定表头、标准双引号转义和 `.` 小数点。不�
 
 | 字段 | 当前规则 |
 |---|---|
-| `method` | `sha256-subject-day-first-condition-v1`，按协议、被试和天数确定可复现的伪随机首条件 |
-| `seed` | 将 `[experiment_protocol_id, 规范化被试编号, day]` 以无多余空格、不转义中文的 JSON 序列化并编码为 UTF-8 后计算 SHA-256，保存完整 64 位十六进制摘要；被试编号先去首尾空格，再作 `casefold()`，保留前导零 |
+| `method` | `sha256-subject-round-first-condition-v1`，按协议、被试和轮次确定可复现的伪随机首条件 |
+| `seed` | 将 `[experiment_protocol_id, 规范化被试编号, round]` 以无多余空格、不转义中文的 JSON 序列化并编码为 UTF-8 后计算 SHA-256，保存完整 64 位十六进制摘要；被试编号先去首尾空格，再作 `casefold()`，保留前导零 |
 | `first_condition` | `seed` 的最后一位十六进制数为偶数时取 `attention`，奇数时取 `relax`，后续三个 trial 交替 |
-| `retry_policy` | `reuse-subject-day`，同协议、同被试、同一天沿用首条件和顺序 |
+| `retry_policy` | `reuse-subject-round`，同协议、同被试、同一轮沿用首条件和顺序 |
 
-同一被试同一天在重复预检、刷新页面、重启服务或重采时不会重新抽取首条件；仅改变编号的字母大小写也不会改变分配。界面和会话保存的 `subject_id` 仍保留原字母大小写与前导零。不同被试或天数可能得到不同结果，但不保证各条件人数严格各半。该方法不随机同条件内的视频顺序。
+同一被试同一轮在重复预检、刷新页面、重启服务或重采时不会重新抽取首条件；仅改变编号的字母大小写也不会改变分配。界面和会话保存的 `subject_id` 仍保留原字母大小写与前导零。不同被试或轮次可能得到不同结果，但不保证各条件人数严格各半。该方法不随机同条件内的视频顺序。
 
-Day 1 使用 attention_01/02，Day 2 使用 attention_03/04，Day 3 使用 attention_05/06；relax_01/02 每天各使用一次。每个条件中的两个视频按编号先后出现。素材清单 schema 3.0 的 `trial_order` 提供条件内素材顺序，`config.json.trials[].trial_order` 则是按首条件编排后的实际呈现顺序 1–4；分析和事件关联应使用会话快照的实际顺序。
+Round 1 使用 attention_01/02，Round 2 使用 attention_03/04，Round 3 使用 attention_05/06；relax_01/02 每轮各使用一次。每个条件中的两个视频按编号先后出现。素材清单 schema 4.0 的 `trial_order` 提供条件内素材顺序，`config.json.trials[].trial_order` 则是按首条件编排后的实际呈现顺序 1–4；分析和事件关联应使用会话快照的实际顺序。
 
-`plan_id` 不等于 `seed`：前者绑定规范化被试编号、天数、协议及完整的四 trial 计划（包含素材元数据），后者只决定首条件。预检返回 `plan_id`，开始采集时重新生成计划并核对该标识，防止正式执行的顺序或素材与已检查计划不一致。更换素材后应重新预检；既有 session 的快照保持原样。
+`plan_id` 不等于 `seed`：前者绑定规范化被试编号、轮次、协议及完整的四 trial 计划（包含素材元数据），后者只决定首条件。预检返回 `plan_id`，开始采集时重新生成计划并核对该标识，防止正式执行的顺序或素材与已检查计划不一致。更换素材后应重新预检；既有 session 的快照保持原样。

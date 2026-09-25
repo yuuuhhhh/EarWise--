@@ -17,30 +17,30 @@ class RecorderTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="mema-recorder-test-")
         self.root = Path(self.temporary.name)
-        self.directory = self.root / "sub_001" / "day_01" / "round_01" / "session-test"
+        self.directory = self.root / "sub_001" / "round_01" / "session-test"
         self.failures = []
         self.failed = threading.Event()
-        self.snapshot = self.planned_snapshot(day=1, first="attention")
+        self.snapshot = self.planned_snapshot(round=1, first="attention")
         self.recorder = None
 
-    def planned_snapshot(self, *, day, first):
+    def planned_snapshot(self, *, round, first):
         subject = next(f"recorder-{first}-{number}" for number in range(100)
-                       if randomization_for(f"recorder-{first}-{number}", day)["first_condition"] == first)
-        randomization = randomization_for(subject, day)
+                       if randomization_for(f"recorder-{first}-{number}", round)["first_condition"] == first)
+        randomization = randomization_for(subject, round)
         plan = []
         conditions = (first, "relax" if first == "attention" else "attention")
         for order in range(1, 5):
             condition = conditions[(order - 1) % 2]
-            video_index = (order - 1) // 2 + 1 + ((day - 1) * 2 if condition == "attention" else 0)
+            video_index = (order - 1) // 2 + 1 + ((round - 1) * 2 if condition == "attention" else 0)
             path = f"{condition}_video/{video_index:02d}.mp4"
             plan.append(dict(condition=condition, trial_order=order,
                              video=dict(video_id=f"{condition}_{video_index:02d}", path=path,
                                         filename=f"{video_index:02d}.mp4", url=f"/media/{path}",
                                         duration_seconds=4.0, codecs=["avc1", "mp4a"], size_bytes=100,
                                         mtime_ns=100, ctime_ns=100, sha256="a" * 64)))
-        return dict(schema_version="1.0", session_id="session-test", subject_id=subject,
-                    experiment_protocol_id=EXPERIMENT_PROTOCOL_ID, day=day, round=1,
-                    randomization=randomization, plan_id=plan_fingerprint(subject, day, plan),
+        return dict(schema_version="2.0", session_id="session-test", subject_id=subject,
+                    experiment_protocol_id=EXPERIMENT_PROTOCOL_ID, round=round,
+                    randomization=randomization, plan_id=plan_fingerprint(subject, round, plan),
                     session_status="recording", started_monotonic_ns=1000,
                     trials=[dict(item, trial_id=f"t{item['trial_order']}", completed=True,
                                  rating_submitted=True) for item in plan],
@@ -49,7 +49,7 @@ class RecorderTests(unittest.TestCase):
     def refresh_plan_id(self, snapshot):
         plan = [{key: trial[key] for key in ("condition", "trial_order", "video")}
                 for trial in snapshot["trials"]]
-        snapshot["plan_id"] = plan_fingerprint(snapshot["subject_id"], snapshot["day"], plan)
+        snapshot["plan_id"] = plan_fingerprint(snapshot["subject_id"], snapshot["round"], plan)
 
     def tearDown(self):
         if self.recorder and not self.recorder.closed:
@@ -69,12 +69,16 @@ class RecorderTests(unittest.TestCase):
         return {**copy.deepcopy(self.snapshot), "session_status": status, "termination_reason": ""}
 
     def eeg(self, index=0, **extra):
-        return dict(session_id="session-test", sample_row_index=index, device_seq=index % 256,
+        value = dict(session_id="session-test", subject_id=self.snapshot["subject_id"],
+                    round=self.snapshot["round"], sample_row_index=index, device_seq=index % 256,
                     stream_epoch_id=1, channel_0_raw=-8388608, channel_1_raw=8388607,
-                    channel_0_uv=None, channel_1_uv=None, **extra)
+                    channel_0_uv=None, channel_1_uv=None)
+        value.update(extra)
+        return value
 
     def event(self, kind, trial=None, **extra):
-        value = dict(session_id="session-test", event_id=f"e-{time.monotonic_ns()}", event_type=kind,
+        value = dict(session_id="session-test", subject_id=self.snapshot["subject_id"], round=self.snapshot["round"],
+                     event_id=f"e-{time.monotonic_ns()}", event_type=kind,
                      trial_id=trial, details_json=json.dumps({"message": '保留中文，逗号,"引号"\n换行'}, ensure_ascii=False))
         metadata = next((item for item in self.snapshot["trials"] if item["trial_id"] == trial), None)
         if metadata:
@@ -119,7 +123,8 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(json.loads(labels[0]["details_json"])["message"], '保留中文，逗号,"引号"\n换行')
         self.assertEqual(result["summary"]["actual_rows"], 1)
         self.assertEqual(result["summary"]["event_rows"], 16)
-        self.assertEqual(result["schema_version"], "1.0")
+        self.assertEqual(result["schema_version"], "2.0")
+        self.assertNotIn("day", result)
         self.assertEqual(result["experiment_protocol_id"], EXPERIMENT_PROTOCOL_ID)
         ratings = {row["trial_id"]: row for row in labels if row["event_type"] == "RATING_SUBMITTED"}
         for index in range(1, 5):
@@ -132,16 +137,24 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(persisted["plan_id"], self.snapshot["plan_id"])
         self.assertEqual(self.failures, [])
 
-    def test_both_random_first_conditions_complete_on_all_three_days(self):
-        for day in (1, 2, 3):
+    def test_both_random_first_conditions_complete_on_all_three_rounds(self):
+        for rnd in (1, 2, 3):
             for first in ("attention", "relax"):
-                with self.subTest(day=day, first=first):
-                    self.directory = self.directory.with_name(f"day-{day}-{first}")
-                    self.snapshot = self.planned_snapshot(day=day, first=first)
+                with self.subTest(round=rnd, first=first):
+                    self.directory = self.root / "sub_001" / f"round_{rnd:02d}" / first
+                    self.snapshot = self.planned_snapshot(round=rnd, first=first)
                     self.initialize()
                     self.complete_rows()
                     result = self.recorder.finish(self.terminal(), True)
                     self.assertEqual(result["session_status"], "completed", result["termination_reason"])
+                    for name in ("eeg_raw.csv", "labels.csv"):
+                        rows = self.read_rows(name)
+                        self.assertTrue(rows)
+                        self.assertEqual(list(rows[0])[:3], ["session_id", "subject_id", "round"])
+                        for row in rows:
+                            self.assertEqual(row["subject_id"], self.snapshot["subject_id"])
+                            self.assertEqual(row["round"], str(rnd))
+                            self.assertNotIn("day", row)
 
     def test_only_two_finished_trials_cannot_complete_round(self):
         self.initialize()
@@ -232,8 +245,8 @@ class RecorderTests(unittest.TestCase):
                 terminal["experiment_protocol_id"] = protocol
                 self.assertEqual(self.recorder.finish(terminal, True)["session_status"], "save_failed")
 
-    def test_round_must_be_exact_integer_one(self):
-        for rnd in (0, 2, 3, 4, True, 1.0, "1", None):
+    def test_round_must_be_exact_integer_in_three_round_protocol(self):
+        for rnd in (0, 4, True, 1.0, "1", None):
             with self.subTest(round=rnd):
                 self.directory = self.directory.with_name(f"invalid-round-{rnd}")
                 self.snapshot["round"] = rnd
@@ -243,27 +256,26 @@ class RecorderTests(unittest.TestCase):
                 self.assertEqual(result["session_status"], "save_failed")
                 self.assertIn("round 编号", result["termination_reason"])
 
-    def test_day_must_be_exact_integer_in_three_day_protocol(self):
-        for day in (0, 4, True, 1.0, "1", None):
-            with self.subTest(day=day):
-                self.directory = self.directory.with_name(f"invalid-day-{day}")
+    def test_new_snapshots_reject_legacy_day_or_wrong_data_schema(self):
+        for field, value in (("day", 1), ("day", None), ("schema_version", "1.0"), ("schema_version", 2.0)):
+            with self.subTest(field=field, value=value):
+                self.directory = self.directory.with_name(f"invalid-{field}-{value}")
                 self.initialize()
                 self.complete_rows()
                 terminal = self.terminal()
-                terminal["day"] = day
+                terminal[field] = value
                 result = self.recorder.finish(terminal, True)
                 self.assertEqual(result["session_status"], "save_failed")
-                self.assertIn("day 编号", result["termination_reason"])
+                self.assertIn("schema", result["termination_reason"])
 
-    def test_randomization_metadata_must_match_subject_and_day(self):
+    def test_randomization_metadata_must_match_subject_and_round(self):
         mutations = (
             ("missing", lambda snapshot: snapshot.pop("randomization")),
             ("method", lambda snapshot: snapshot["randomization"].update(method="untracked")),
             ("seed", lambda snapshot: snapshot["randomization"].update(seed="0" * 64)),
             ("first", lambda snapshot: snapshot["randomization"].update(first_condition="relax")),
             ("retry", lambda snapshot: snapshot["randomization"].update(retry_policy="reroll")),
-            ("subject", lambda snapshot: snapshot.update(subject_id="another-subject")),
-            ("day", lambda snapshot: snapshot.update(day=2)),
+            ("scope", lambda snapshot: snapshot["randomization"].update(scope="subject+day")),
         )
         for name, mutate in mutations:
             with self.subTest(name=name):
@@ -275,6 +287,60 @@ class RecorderTests(unittest.TestCase):
                 result = self.recorder.finish(terminal, True)
                 self.assertEqual(result["session_status"], "save_failed")
                 self.assertIn("随机顺序", result["termination_reason"])
+
+    def test_every_eeg_and_label_row_must_keep_subject_and_round_even_when_aborted(self):
+        for status in ("completed", "aborted"):
+            for kind in ("eeg", "event"):
+                for field, value in (("round", 2), ("round", ""), ("subject_id", "other-subject"),
+                                     ("subject_id", ""), ("session_id", "other-session")):
+                    with self.subTest(status=status, kind=kind, field=field, value=value):
+                        self.directory = self.directory.with_name(f"identity-{status}-{kind}-{field}-{value}")
+                        self.initialize()
+                        if status == "completed":
+                            self.complete_rows()
+                        else:
+                            self.recorder.submit("eeg", self.eeg())
+                            self.recorder.submit("event", self.event("SESSION_START"))
+                        invalid = self.eeg(1, **{field: value}) if kind == "eeg" else self.event("DIAGNOSTIC", **{field: value})
+                        self.recorder.submit(kind, invalid)
+                        result = self.recorder.finish(self.terminal(status), status == "completed")
+                        self.assertEqual(result["session_status"], "save_failed")
+                        self.assertIn("身份", result["termination_reason"])
+
+    def test_snapshot_subject_or_round_cannot_relabel_persisted_recording(self):
+        for status in ("completed", "aborted"):
+            for field, value in (("subject_id", "another-subject"), ("round", 2)):
+                with self.subTest(status=status, field=field):
+                    self.directory = self.directory.with_name(f"snapshot-identity-{status}-{field}")
+                    self.initialize()
+                    self.complete_rows()
+                    terminal = self.terminal(status)
+                    terminal[field] = value
+                    result = self.recorder.finish(terminal, status == "completed")
+                    self.assertEqual(result["session_status"], "save_failed")
+                    self.assertIn("身份", result["termination_reason"])
+
+    def test_csv_headers_cannot_omit_round_identity_or_add_legacy_day(self):
+        for name in ("eeg_raw.csv", "labels.csv"):
+            for variant in ("missing-round", "legacy-day"):
+                with self.subTest(name=name, variant=variant):
+                    self.directory = self.directory.with_name(f"header-{name}-{variant}")
+                    self.initialize()
+                    self.complete_rows()
+                    terminal = self.recorder.finish(self.terminal(), True)
+                    self.assertEqual(terminal["session_status"], "completed")
+                    rows = self.read_rows(name)
+                    fields = list(rows[0])
+                    if variant == "missing-round":
+                        fields.remove("round")
+                    else:
+                        fields.append("day")
+                    with (self.directory / name).open("w", encoding="utf-8", newline="") as destination:
+                        writer = csv.DictWriter(destination, fields, extrasaction="ignore")
+                        writer.writeheader()
+                        writer.writerows(rows)
+                    with self.assertRaisesRegex(OSError, "表头"):
+                        self.recorder.verify(terminal, True)
 
     def test_plan_fingerprint_detects_video_metadata_changes(self):
         mutations = (
@@ -294,13 +360,13 @@ class RecorderTests(unittest.TestCase):
                 self.assertEqual(result["session_status"], "save_failed")
                 self.assertIn("播放计划指纹", result["termination_reason"])
 
-    def test_valid_fingerprint_cannot_authorize_wrong_day_videos_or_pair_order(self):
-        for variant in ("wrong-day", "swapped-pairs", "wrong-path", "wrong-filename"):
+    def test_valid_fingerprint_cannot_authorize_wrong_round_videos_or_pair_order(self):
+        for variant in ("wrong-round", "swapped-pairs", "wrong-path", "wrong-filename"):
             with self.subTest(variant=variant):
                 self.directory = self.directory.with_name(f"invalid-media-{variant}")
-                self.snapshot = self.planned_snapshot(day=2, first="attention")
+                self.snapshot = self.planned_snapshot(round=2, first="attention")
                 trials = self.snapshot["trials"]
-                if variant == "wrong-day":
+                if variant == "wrong-round":
                     for trial in trials:
                         if trial["condition"] == "attention":
                             index = (trial["trial_order"] - 1) // 2 + 1
@@ -318,7 +384,7 @@ class RecorderTests(unittest.TestCase):
                 self.complete_rows()
                 result = self.recorder.finish(self.terminal(), True)
                 self.assertEqual(result["session_status"], "save_failed")
-                self.assertIn("当天视频素材", result["termination_reason"])
+                self.assertIn("本轮视频素材", result["termination_reason"])
 
     def test_barrier_persists_questionnaire_before_return(self):
         self.initialize()
@@ -407,8 +473,52 @@ class RecorderTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), data)
         recovery_event = self.read_rows("labels.csv")[-1]
         self.assertEqual(recovery_event["event_type"], "SESSION_INTERRUPTED")
+        self.assertEqual(recovery_event["subject_id"], self.snapshot["subject_id"])
+        self.assertEqual(recovery_event["round"], "1")
+        self.assertNotIn("day", recovery_event)
         self.assertEqual(recovery_event["event_monotonic_ns"], "")
         self.assertTrue(json.loads(recovery_event["details_json"])["recovered_on_startup"])
+        self.assertEqual(recover_sessions(self.root), [])
+
+    def test_legacy_recovery_retains_old_paths_schemas_headers_and_terminal_records(self):
+        legacy_parent = self.root / "sub_legacy" / "day_02" / "round_01"
+        legacy_fields = [field for field in LABEL_FIELDS if field not in ("subject_id", "round")]
+        terminal_bytes = []
+        for status in ("recording", "completed", "aborted", "interrupted", "save_failed"):
+            directory = legacy_parent / status
+            directory.mkdir(parents=True)
+            snapshot = dict(schema_version="1.0", experiment_protocol_id="earwise-3day-1round-4trial-randomstart-v3",
+                            session_id=f"legacy-{status}", subject_id="legacy", day=2, round=1,
+                            session_status=status, termination_reason="keep original reason")
+            atomic_json(directory / "config.json", snapshot)
+            (directory / "eeg_raw.csv").write_bytes(b"session_id,sample_row_index\r\nlegacy,0\r\n")
+            with (directory / "labels.csv").open("w", encoding="utf-8", newline="") as destination:
+                writer = csv.DictWriter(destination, legacy_fields)
+                writer.writeheader()
+                writer.writerow(dict(session_id=snapshot["session_id"], event_id="legacy-event", event_type="SESSION_START"))
+            if status != "recording":
+                terminal_bytes.extend((path, path.read_bytes()) for path in directory.iterdir())
+        recording = legacy_parent / "recording"
+        raw_before = (recording / "eeg_raw.csv").read_bytes()
+        labels_before = (recording / "labels.csv").read_bytes()
+        self.assertEqual(recover_sessions(self.root), [str(recording)])
+        snapshot = json.loads((recording / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(snapshot["session_status"], "interrupted")
+        self.assertEqual(snapshot["schema_version"], "1.0")
+        self.assertEqual(snapshot["experiment_protocol_id"], "earwise-3day-1round-4trial-randomstart-v3")
+        self.assertEqual((snapshot["day"], snapshot["round"]), (2, 1))
+        self.assertEqual((recording / "eeg_raw.csv").read_bytes(), raw_before)
+        self.assertTrue((recording / "labels.csv").read_bytes().startswith(labels_before))
+        with (recording / "labels.csv").open(encoding="utf-8", newline="") as source:
+            reader = csv.DictReader(source)
+            rows = list(reader)
+            self.assertEqual(reader.fieldnames, legacy_fields)
+        self.assertEqual(len(rows), 2)
+        self.assertNotIn(None, rows[-1])
+        self.assertEqual(rows[-1]["session_id"], "legacy-recording")
+        self.assertEqual(rows[-1]["event_type"], "SESSION_INTERRUPTED")
+        for path, data in terminal_bytes:
+            self.assertEqual(path.read_bytes(), data)
         self.assertEqual(recover_sessions(self.root), [])
 
 

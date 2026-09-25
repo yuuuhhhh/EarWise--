@@ -38,15 +38,15 @@ def mock_catalog():
             for condition, count in (("attention", 6), ("relax", 2)) for index in range(1, count + 1)]
 
 
-def mock_plan(_root, day, rnd=1, *, subject_id="001"):
-    first = randomization_for(subject_id, day)["first_condition"]
+def mock_plan(_root, rnd, *, subject_id="001"):
+    first = randomization_for(subject_id, rnd)["first_condition"]
     order = ("attention", "relax", "attention", "relax") if first == "attention" else ("relax", "attention", "relax", "attention")
     catalog = {video["video_id"]: video for video in mock_catalog()}
     result = []
     for position, condition in enumerate(order):
         index = position // 2 + 1
         if condition == "attention":
-            index += (day - 1) * 2
+            index += (rnd - 1) * 2
         result.append(dict(trial_order=position + 1, condition=condition,
                            video=copy.deepcopy(catalog[f"{condition}_{index:02}"])))
     return result
@@ -98,7 +98,7 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
     async def start(self, rnd=1, **extra):
         self.requests += 1
         self.feed()
-        body = self.body(subject_id="001", day=1, round=rnd, request_id=f"request-{self.requests:04}", audio_confirmed=True)
+        body = self.body(subject_id="001", round=rnd, request_id=f"request-{self.requests:04}", audio_confirmed=True)
         body.update(extra)
         preflight = await self.controller.action("preflight", body)
         body.setdefault("plan_id", preflight["plan_id"])
@@ -149,13 +149,14 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         return rating
 
     async def test_both_random_start_orders_have_exact_three_auditable_files(self):
-        for order in (["attention", "relax", "attention", "relax"],
-                      ["relax", "attention", "relax", "attention"]):
+        cases = [(rnd, order) for rnd in (1, 2, 3) for order in (
+            ["attention", "relax", "attention", "relax"], ["relax", "attention", "relax", "attention"])]
+        for rnd, order in cases:
             subject = next(f"{n:03}" for n in range(100)
-                           if randomization_for(f"{n:03}", 1)["first_condition"] == order[0])
-            with self.subTest(first=order[0]):
-                preview = await self.controller.action("preflight", self.body(subject_id=subject, day=1))
-                await self.start(subject_id=subject)
+                           if randomization_for(f"{n:03}", rnd)["first_condition"] == order[0])
+            with self.subTest(round=rnd, first=order[0]):
+                preview = await self.controller.action("preflight", self.body(subject_id=subject, round=rnd))
+                await self.start(rnd, subject_id=subject)
                 await self.advance(29.75)
                 self.assertEqual(self.controller.session["stage"], "baseline")
                 await self.advance(.25)
@@ -176,7 +177,14 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(all(row["channel_0_uv"] == row["channel_1_uv"] == "" for row in eeg))
                 self.assertEqual(config["mode"], "simulation")
                 self.assertEqual(config["subject_id"], subject)
-                self.assertEqual(config["round"], 1)
+                self.assertEqual(config["round"], rnd)
+                self.assertNotIn("day", config)
+                self.assertNotIn("day", self.controller.session)
+                self.assertEqual(config["schema_version"], "2.0")
+                self.assertEqual(directory.parent, self.controller.data_root / f"sub_{subject}" / f"round_{rnd:02}")
+                self.assertTrue(all(row["round"] == str(rnd) and row["subject_id"] == subject for row in eeg + labels))
+                self.assertNotIn("day", eeg[0])
+                self.assertNotIn("day", labels[0])
                 self.assertEqual(config["plan_id"], preview["plan_id"])
                 self.assertEqual(config["randomization"], preview["randomization"])
                 self.assertEqual([t["video"] for t in config["trials"]], [t["video"] for t in preview["plan"]])
@@ -202,35 +210,39 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(row["relax_score" if row["condition"] == "attention" else "attention_score"], "")
                     self.assertEqual(row["confidence_score"], "4")
 
-    async def test_only_round_one_is_accepted(self):
-        for rnd in (0, 2, 3, 4, 5, True, 1.0, "1", None):
+    async def test_only_rounds_one_to_three_are_accepted(self):
+        for rnd in (0, 4, 5, True, 1.0, "1", None):
             with self.subTest(round=rnd):
                 with self.assertRaises(ExperimentError):
-                    await self.controller.action("preflight", self.body(subject_id="001", day=1, round=rnd))
+                    await self.controller.action("preflight", self.body(subject_id="001", round=rnd))
                 with self.assertRaises(ExperimentError):
                     await self.start(rnd=rnd)
         self.assertIsNone(self.controller.recorder)
 
-    async def test_no_round_field_is_required_and_preview_survives_page_change(self):
-        identity = dict(subject_id="001", day=1)
+    async def test_round_is_required_and_preview_survives_page_change(self):
+        for identity in (dict(subject_id="001"), dict(subject_id="001", day=1),
+                         dict(subject_id="001", day=1, round=2)):
+            with self.subTest(identity=identity), self.assertRaises(ExperimentError):
+                await self.controller.action("preflight", self.body(**identity))
+        identity = dict(subject_id="001", round=1)
         preview = await self.controller.action("preflight", self.body(**identity))
         repeated = await self.controller.action("preflight", self.body(**identity))
         refreshed = await self.controller.action("preflight", dict(client_id=OBSERVER, **identity))
         self.assertEqual(preview, repeated)
         self.assertEqual(preview, refreshed)
         self.assertIsNone(self.controller.recorder)
-        await self.controller.action("start", self.body(**identity, request_id="without-round",
+        await self.controller.action("start", self.body(**identity, request_id="round-identity",
                                      plan_id=preview["plan_id"], audio_confirmed=True))
         self.assertEqual(self.controller.session["round"], 1)
         self.assertEqual(self.controller.session["plan_id"], preview["plan_id"])
         self.assertEqual(self.controller.session["randomization"], preview["randomization"])
 
     async def test_missing_stale_or_other_identity_plan_cannot_start(self):
-        preview = await self.controller.action("preflight", self.body(subject_id="001", day=1))
-        base = self.body(subject_id="001", day=1, request_id="plan-check-start",
+        preview = await self.controller.action("preflight", self.body(subject_id="001", round=1))
+        base = self.body(subject_id="001", round=1, request_id="plan-check-start",
                          audio_confirmed=True, plan_id=preview["plan_id"])
         for change in ({"plan_id": None}, {"plan_id": "wrong-plan"},
-                       {"subject_id": "002"}, {"day": 2}):
+                       {"subject_id": "002"}, {"round": 2}):
             with self.subTest(change=change), self.assertRaisesRegex(ExperimentError, "计划"):
                 await self.controller.action("start", {**base, **change})
         changed = mock_plan(self.root, 1, subject_id="001")
@@ -239,7 +251,7 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ExperimentError, "计划"):
                 await self.controller.action("start", base)
         self.assertIsNone(self.controller.recorder)
-        self.assertFalse(list(self.controller.data_root.glob("sub_*/day_*/round_*/*/config.json")))
+        self.assertFalse(list(self.controller.data_root.glob("sub_*/round_*/*/config.json")))
 
     async def test_previous_two_round_protocol_is_kept_but_not_counted(self):
         directory = self.controller.data_root / "sub_001/day_01/round_01/old-v2"
@@ -248,7 +260,7 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         path.write_text(json.dumps(dict(session_id="old-v2", session_status="completed",
                         experiment_protocol_id="earwise-3day-2round-4trial-v2")), encoding="utf-8")
         before = path.read_bytes()
-        preview = await self.controller.action("preflight", self.body(subject_id="001", day=1))
+        preview = await self.controller.action("preflight", self.body(subject_id="001", round=1))
         self.assertEqual(preview["previous_attempts"], [])
         await self.start()
         await self.controller.action("abort", self.body())
@@ -257,15 +269,49 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(saved["retry_of_session_id"])
         self.assertEqual(path.read_bytes(), before)
 
+    async def test_old_day_layout_is_preserved_and_new_round_has_its_own_directory(self):
+        old_directory = self.controller.data_root / "sub_001/day_02/round_01/old-v3"
+        old_directory.mkdir(parents=True)
+        old_config = old_directory / "config.json"
+        old_config.write_text(json.dumps(dict(session_id="old-v3", session_status="completed",
+                              subject_id="001", day=2, round=1, schema_version="1.0",
+                              experiment_protocol_id="earwise-3day-1round-4trial-randomstart-v3")), encoding="utf-8")
+        before = old_config.read_bytes()
+        preview = await self.controller.action("preflight", self.body(subject_id="001", round=2))
+        self.assertEqual(preview["previous_attempts"], [])
+        await self.start(2)
+        self.feed()
+        await self.controller.action("abort", self.body())
+        eeg, labels, saved = self.read_outputs()
+        self.assertEqual(saved["round"], 2)
+        self.assertNotIn("day", saved)
+        self.assertEqual(saved["attempt_number"], 1)
+        self.assertTrue(all(row["round"] == "2" for row in eeg + labels))
+        self.assertEqual(Path(self.controller.session["output_directory"]).parent,
+                         self.controller.data_root / "sub_001/round_02")
+        self.assertEqual(old_config.read_bytes(), before)
+
+    async def test_attempt_listing_rejects_records_belonging_to_another_round(self):
+        parent = self.controller.data_root / "sub_001/round_02"
+        for name, changes in (("wrong-round", {"round": 1}), ("wrong-subject", {"subject_id": "002"}),
+                              ("legacy-field", {"day": 2}), ("invalid-subject", {"subject_id": 1})):
+            directory = parent / name
+            directory.mkdir(parents=True)
+            metadata = dict(schema_version="2.0", experiment_protocol_id=EXPERIMENT_PROTOCOL_ID,
+                            subject_id="001", round=2, session_id=name, session_status="completed")
+            metadata.update(changes)
+            (directory / "config.json").write_text(json.dumps(metadata), encoding="utf-8")
+        self.assertEqual(self.controller.attempts("001", 2), [])
+
     async def test_old_two_trial_completion_does_not_block_new_protocol(self):
         directory = self.controller.data_root / "sub_001/day_01/round_01/legacy-two-trial"
         directory.mkdir(parents=True)
         legacy = {"session_id": "legacy-two-trial", "session_status": "completed", "attempt_number": 1,
-                  "started_at_utc": "2026-09-01T00:00:00+00:00", "trials": mock_plan(self.root, 1, 1)[:2]}
+                  "started_at_utc": "2026-09-01T00:00:00+00:00", "trials": mock_plan(self.root, 1)[:2]}
         legacy_path = directory / "config.json"
         legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
         before = legacy_path.read_bytes()
-        preflight = await self.controller.action("preflight", self.body(subject_id="001", day=1, round=1))
+        preflight = await self.controller.action("preflight", self.body(subject_id="001", round=1))
         self.assertEqual(preflight["previous_attempts"], [])
         self.assertEqual(len(preflight["plan"]), 4)
         await self.start()
@@ -299,7 +345,7 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(row["event_type"] == "RATING_SUBMITTED" for row in labels), 2)
 
     async def test_outdated_two_trial_plan_cannot_start(self):
-        with patch("app.controller.plan_for", return_value=mock_plan(self.root, 1, 1)[:2]):
+        with patch("app.controller.plan_for", return_value=mock_plan(self.root, 1)[:2]):
             with self.assertRaisesRegex(ExperimentError, "4.*trial"):
                 await self.start()
         self.assertFalse(self.controller.recording)
@@ -323,14 +369,14 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         for field, value in (("size_bytes", 10001), ("mtime_ns", 1000001),
                              ("ctime_ns", 1000001), ("duration_seconds", 7.0)):
             with self.subTest(field=field):
-                changed = mock_plan(self.root, 1, 1)
+                changed = mock_plan(self.root, 1)
                 changed[0]["video"][field] = value
                 with patch("app.controller.plan_for", return_value=changed):
                     with self.assertRaisesRegex(ExperimentError, "素材.*发生变化"):
                         await self.start()
                 self.assertFalse(self.controller.recording)
                 self.assertIsNone(self.controller.recorder)
-                self.assertEqual(list(self.controller.data_root.glob("sub_*/day_*/round_*/*/config.json")), [])
+                self.assertEqual(list(self.controller.data_root.glob("sub_*/round_*/*/config.json")), [])
 
     async def test_connected_without_first_frame_is_waiting_and_not_ready(self):
         self.controller.on_status("disconnected", "测试断开")
@@ -341,7 +387,7 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(state["quality"]["loss_pct"])
         self.assertIn("等待近期有效脑电数据", state["readiness_errors"])
         with self.assertRaises(ExperimentError):
-            await self.controller.action("start", self.body(subject_id="001", day=1, round=1,
+            await self.controller.action("start", self.body(subject_id="001", round=1,
                                                            request_id="waiting-start", audio_confirmed=True))
 
     async def test_connect_and_command_serialize_with_start_without_blocking_idle_tick(self):
@@ -388,7 +434,7 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
             for required in ("左右耳映射", "原始模式命令", "名义采样率", "ADC 削顶定义"):
                 self.assertIn(required, errors)
             with self.assertRaises(ExperimentError):
-                await real.action("start", dict(client_id=OWNER, subject_id="001", day=1, round=1,
+                await real.action("start", dict(client_id=OWNER, subject_id="001", round=1,
                                                  request_id="real-unverified-start", audio_confirmed=True))
             self.assertIsNone(real.session)
             self.assertIsNone(real.recorder)
