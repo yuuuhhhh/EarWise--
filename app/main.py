@@ -4,12 +4,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import errno
 import json
 import logging
 import os
 import signal
 import sys
-import webbrowser
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -18,6 +18,7 @@ import tornado.web
 import tornado.websocket
 
 from .controller import Controller, ExperimentError
+from .instance import AlreadyRunning, clear_instance, make_instance, open_browser, reopen_instance, write_instance
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,8 +36,9 @@ class LocalOnly:
 
 
 class ApiHandler(LocalOnly, tornado.web.RequestHandler):
-    def initialize(self, controller):
+    def initialize(self, controller, instance=None):
         self.controller = controller
+        self.instance = instance
 
     def prepare(self):
         self.check_local()
@@ -47,6 +49,8 @@ class ApiHandler(LocalOnly, tornado.web.RequestHandler):
             self.write(self.controller.state())
         elif action == 'clock':
             self.write(dict(server_monotonic_ns=self.controller.clock(), server_utc=self.controller.utc()))
+        elif action == 'instance' and self.instance is not None:
+            self.write(self.instance)
         else:
             raise tornado.web.HTTPError(404)
 
@@ -110,12 +114,12 @@ class LocalStatic(LocalOnly, tornado.web.StaticFileHandler):
         return None
 
 
-def make_app(controller):
+def make_app(controller, instance=None):
     return tornado.web.Application([
-        (r'/api/([a-z_]+)', ApiHandler, {'controller': controller}),
+        (r'/api/([a-z_]+)', ApiHandler, {'controller': controller, 'instance': instance}),
         (r'/ws', StateSocket, {'controller': controller}),
         (r'/static/(.*)', LocalStatic, {'path': str(ROOT / 'web')}),
-        (r'/media/(attention_video/(?:0[1-9]|1[0-2])\.mp4|relax_video/0[1-4]\.mp4)', LocalStatic, {'path': str(ROOT)}),
+        (r'/media/(attention_video/0[1-6]\.mp4|relax_video/0[1-2]\.mp4)', LocalStatic, {'path': str(ROOT)}),
         (r'/(.*)', LocalStatic, {'path': str(ROOT / 'web'), 'default_filename': 'index.html'}),
     ], websocket_ping_interval=10, websocket_ping_timeout=10, websocket_max_message_size=16384,
         serve_traceback=False)
@@ -139,7 +143,9 @@ def process_lock(root):
                 import fcntl
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
-            raise RuntimeError('本项目已有采集服务运行，请使用现有页面或先关闭原服务。') from exc
+            if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                raise AlreadyRunning('本项目已有采集服务运行。') from exc
+            raise
         try:
             yield
         finally:
@@ -151,8 +157,8 @@ def process_lock(root):
 async def run(args):
     controller = Controller(ROOT, args.simulate)
     await controller.initialize()
-    server = tornado.httpserver.HTTPServer(make_app(controller), max_body_size=1024*1024)
-    server.listen(args.port, address='127.0.0.1')
+    instance = make_instance(args.port, args.simulate)
+    server = tornado.httpserver.HTTPServer(make_app(controller, instance), max_body_size=1024*1024)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     def shutdown(*_):
@@ -160,13 +166,15 @@ async def run(args):
     signal.signal(signal.SIGINT, shutdown)
     if hasattr(signal, 'SIGTERM'):
         signal.signal(signal.SIGTERM, shutdown)
-    url = f'http://127.0.0.1:{args.port}'
-    print(f'EarWise采集系统 | {"模拟模式（非正式数据）" if args.simulate else "真实设备模式"}', flush=True)
-    print(f'打开浏览器：{url}\n按 Ctrl+C 安全关闭。', flush=True)
-    if not args.no_browser:
-        webbrowser.open(url)
     last_publish = 0
     try:
+        server.listen(args.port, address='127.0.0.1')
+        write_instance(ROOT, instance)
+        url = instance['url']
+        print(f'EarWise采集系统 | {"模拟模式（非正式数据）" if args.simulate else "真实设备模式"}', flush=True)
+        print(f'打开浏览器：{url}\n按 Ctrl+C 安全关闭。', flush=True)
+        if not args.no_browser:
+            open_browser(url)
         while not stop.is_set():
             await controller.tick()
             now = loop.time()
@@ -184,22 +192,38 @@ async def run(args):
                 pass
     finally:
         server.stop()
-        await controller.close()
-        for client in list(controller.clients):
-            client.close()
-        await server.close_all_connections()
+        try:
+            await controller.close()
+            for client in list(controller.clients):
+                client.close()
+            await server.close_all_connections()
+        finally:
+            clear_instance(ROOT, instance['instance_id'])
+
+
+def parse_port(value):
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('端口必须是 1–65535 的整数') from exc
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError('端口必须是 1–65535 的整数')
+    return port
 
 
 def main():
     parser = argparse.ArgumentParser(description='EarWise采集系统：本地双通道耳机脑电采集')
     parser.add_argument('--simulate', action='store_true', help='使用明确标记的模拟数据；输出 simulation_data')
-    parser.add_argument('--port', type=int, default=8765)
+    parser.add_argument('--port', type=parse_port, default=8765)
     parser.add_argument('--no-browser', action='store_true')
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     try:
-        with process_lock(ROOT):
-            asyncio.run(run(args))
+        try:
+            with process_lock(ROOT):
+                asyncio.run(run(args))
+        except AlreadyRunning:
+            reopen_instance(ROOT, args)
     except (OSError, ValueError, RuntimeError) as exc:
         print(f'启动失败：{exc}', file=sys.stderr)
         raise SystemExit(1)

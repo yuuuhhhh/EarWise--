@@ -13,7 +13,7 @@
   let shownPendingFailure = "";
   let renderedKey = "";
   let dismissedSession = null;
-  let draft = {subject_id: "", day: "", round: "", audio_confirmed: false, confirm_retry: false};
+  let draft = {subject_id: "", day: "", audio_confirmed: false, confirm_retry: false};
   let preflight = null;
   let startRequestId = crypto.randomUUID();
   let ratingRequestId = crypto.randomUUID();
@@ -92,14 +92,14 @@
     setText("#mode-badge", mode ? "模拟模式 · 非真实 EEG" : "真实设备模式");
     $("#simulation-notice").hidden = !mode;
     $("#identity").hidden = !(active || terminal);
-    if (active || terminal) $("#identity").innerHTML = `<strong>被试 ${esc(session.subject_id)}</strong> Day ${esc(session.day)} <span aria-hidden="true"> / </span> Round ${esc(session.round)}`;
+    if (active || terminal) $("#identity").innerHTML = `<strong>被试 ${esc(session.subject_id)}</strong> Day ${esc(session.day)}`;
     const view = readonly ? "readonly" : terminal ? "terminal" : active ? session.status === "saving" ? "saving" : session.stage === "baseline" ? "baseline" : session.stage === "questionnaire" ? "questionnaire" : isVideoStage(session.stage) ? "video" : "transition" : "registration";
     let step = view === "registration" ? "registration" : view === "baseline" ? "baseline" : view === "terminal" || view === "saving" ? "complete" : "trial";
     if (readonly) step = session.stage === "baseline" ? "baseline" : "trial";
     const stepNames = ["registration", "baseline", "trial", "complete"];
     document.querySelectorAll("[data-step]").forEach((node) => { node.className = node.dataset.step === step ? "active" : stepNames.indexOf(node.dataset.step) < stepNames.indexOf(step) ? "done" : ""; });
     const headings = {
-      registration:["开始一次新的采集","登记本轮信息，检查设备与素材后开始。"],
+      registration:["开始一次新的采集","登记被试与天数，检查设备与素材后开始。"],
       baseline:["正在进行基线采集","采集已开始，请按照下方引导完成基线。"],
       video:["观看本轮实验视频","请完整观看视频，结束后填写对刚才体验的评分。"],
       questionnaire:["记录刚才的体验","请根据刚刚结束的这段视频作答，两题均需填写。"],
@@ -167,20 +167,19 @@
 
   function renderRegistration() {
     $("#main-content").innerHTML = `<section class="card"><div class="card-body">
-      <div class="section-title"><span class="section-number">01 /</span><h2>被试登记</h2></div><p class="subtitle">每天采集 2 个 round，每轮 4 个 trial；可选择任意合法编号进行补采。</p>
+      <div class="section-title"><span class="section-number">01 /</span><h2>被试登记</h2></div><p class="subtitle">每天采集 1 轮，共 4 个 trial：2 个专心、2 个放松；随机决定首个条件，之后交替。</p>
       <form id="registration-form"><div class="form-grid">
         <label class="field"><span>被试编号<span class="required">*</span></span><input id="subject-id" type="text" required maxlength="80" autocomplete="off" placeholder="例如：001（保留前导零）" value="${esc(draft.subject_id)}"></label>
         <label class="field"><span>天数 · Day<span class="required">*</span></span><select id="day" required><option value="" disabled ${!draft.day ? "selected" : ""}>请选择</option>${[1,2,3].map((n)=>`<option value="${n}" ${String(draft.day)===String(n)?"selected":""}>第 ${n} 天</option>`).join("")}</select></label>
-        <label class="field"><span>轮次 · Round<span class="required">*</span></span><select id="round" required><option value="" disabled ${!draft.round ? "selected" : ""}>请选择</option>${[1,2].map((n)=>`<option value="${n}" ${String(draft.round)===String(n)?"selected":""}>第 ${n} 轮</option>`).join("")}</select></label>
       </div><div class="form-actions"><p class="form-hint">登记不会创建数据文件。<br>正式数据从基线开始保存。</p><button id="preflight-button" type="submit" class="button secondary">检查本轮计划 <span aria-hidden="true">→</span></button></div></form>
-      <div class="registration-divider"></div><div class="section-title"><span class="section-number">02 /</span><h2>本轮计划与准备</h2></div><p class="subtitle">30 秒基线 → 视频与量表 × 4 → 保存校验</p><div id="trial-plan" class="empty-plan">完成上方登记后，查看本轮视频与顺序。</div>
+      <div class="registration-divider"></div><div class="section-title"><span class="section-number">02 /</span><h2>本轮计划与准备</h2></div><p class="subtitle">30 秒基线 → 视频与量表 × 4 → 保存校验</p><p id="plan-rule" class="subtitle">同一被试当天的顺序确定后保持不变，重复检查或重新采集不会重新随机。</p><div id="trial-plan" class="empty-plan">完成上方登记后，查看本轮视频与顺序。</div>
       <div id="previous-attempts"></div><div class="checklist"><div id="media-check" class="check-item pending"></div><div id="device-check" class="check-item pending"></div></div><div style="margin-top:15px"><button class="button secondary" id="connect-button">连接设备并预览</button></div><div id="readiness-errors"></div>
       <label class="checkbox-row"><input type="checkbox" id="audio-confirmed" ${draft.audio_confirmed ? "checked" : ""}><span>已确认电脑的声音输出、音量及视频原有音轨可听见。</span></label>
     </div><div class="start-footer"><p>开始后连续保存两路原始 EEG。<br>请保持页面打开，直至采集结束。</p><button id="start-button" class="button" disabled>开始 30 秒基线采集 <span aria-hidden="true">→</span></button></div></section>
     <details class="commissioning" id="commissioning"><summary>实验负责人 · 设备联调与参数核对</summary><div class="commissioning-body"><p>真实设备的命令、采样率、左右耳映射与 ADC 削顶参数须经实机确认，并在 <span class="code-path">config/settings.json</span> 中记录。以下联调命令只在未采集时可用。</p><div class="command-row"><button class="button quiet" data-command="b">发送小写 b</button><button class="button quiet" data-command="S">发送 S</button><button class="button quiet" data-command="R">发送 R</button><button class="button quiet" data-command="I">发送 I</button></div><p style="margin:12px 0 0">以上字节来自参考脚本；按钮不代表硬件含义已验证。不要同时运行原始蓝牙脚本。</p></div></details>`;
     $("#registration-form").addEventListener("submit", (event) => { event.preventDefault(); void runPreflight(); });
-    ["#subject-id", "#day", "#round"].forEach((selector) => $(selector).addEventListener("input", () => {
-      draft.subject_id = $("#subject-id").value; draft.day = $("#day").value; draft.round = $("#round").value;
+    ["#subject-id", "#day"].forEach((selector) => $(selector).addEventListener("input", () => {
+      draft.subject_id = $("#subject-id").value; draft.day = $("#day").value;
       preflight = null; draft.confirm_retry = false; startRequestId = crypto.randomUUID(); clearNotice(); updateRegistration();
     }));
     $("#audio-confirmed").addEventListener("change", (event) => { draft.audio_confirmed = event.target.checked; updateRegistration(); });
@@ -200,6 +199,8 @@
   function updateRegistration() {
     if (!$("#start-button")) return;
     const plan = array(preflight?.plan);
+    const firstCondition = preflight?.randomization?.first_condition;
+    setText("#plan-rule", firstCondition && conditionLabels[firstCondition] ? `本次从${conditionLabels[firstCondition]}开始，之后交替；同一被试当天重复检查或重新采集均沿用此顺序。` : "同一被试当天的顺序确定后保持不变，重复检查或重新采集不会重新随机。");
     const planNode = $("#trial-plan");
     if (plan.length) {
       planNode.className = "plan";
@@ -212,7 +213,7 @@
       const key = attempts.map(a=>`${a.session_id}:${a.status}`).join("|");
       if (attemptsNode.dataset.key !== key) {
         attemptsNode.dataset.key = key;
-        attemptsNode.innerHTML = `<div class="attempts">此被试 / day / round 已有 ${attempts.length} 次记录：<ul>${attempts.map((a)=>`<li>${esc(prettyDate(a.started_at_utc))} · ${esc(statusLabels[a.status] || a.status)}</li>`).join("")}</ul></div>${completed.length ? `<label class="checkbox-row"><input type="checkbox" id="confirm-retry" ${draft.confirm_retry ? "checked" : ""}><span>已知此轮有完成记录，确认重采并保留之前的全部记录。</span></label>` : ""}`;
+        attemptsNode.innerHTML = `<div class="attempts">此被试当天已有 ${attempts.length} 次记录：<ul>${attempts.map((a)=>`<li>${esc(prettyDate(a.started_at_utc))} · ${esc(statusLabels[a.status] || a.status)}</li>`).join("")}</ul></div>${completed.length ? `<label class="checkbox-row"><input type="checkbox" id="confirm-retry" ${draft.confirm_retry ? "checked" : ""}><span>已知当天有完成记录，确认重采并保留之前的全部记录。</span></label>` : ""}`;
         $("#confirm-retry")?.addEventListener("change", (event) => { draft.confirm_retry = event.target.checked; updateRegistration(); });
       }
     } else { attemptsNode.innerHTML = ""; delete attemptsNode.dataset.key; }
@@ -225,9 +226,11 @@
     $("#device-check").className = `check-item ${deviceOk ? "ok" : "pending"}`;
     $("#device-check").innerHTML = checkMarkup(deviceOk, deviceOk ? "设备与记录器已就绪，预览数据不写入正式文件" : "等待设备、近期有效 EEG 与正式采集配置检查");
     $("#readiness-errors").innerHTML = uniqueErrors.length ? `<div class="notice caution compact"><strong>开始前需完成</strong><ul>${uniqueErrors.map((error)=>`<li>${esc(error)}</li>`).join("")}</ul></div>` : "";
-    $("#start-button").disabled = starting || !connected || !preflight || !plan.length || uniqueErrors.length > 0 || !mediaOk || !draft.audio_confirmed || (completed.length > 0 && !draft.confirm_retry);
+    $("#start-button").disabled = starting || fetchingPreflight || !connected || !preflight?.plan_id || !plan.length || uniqueErrors.length > 0 || !mediaOk || !draft.audio_confirmed || (completed.length > 0 && !draft.confirm_retry);
     $("#start-button").textContent = starting ? "正在建立采集记录…" : "开始 30 秒基线采集 →";
-    $("#preflight-button").disabled = fetchingPreflight;
+    $("#preflight-button").disabled = fetchingPreflight || starting;
+    $("#subject-id").disabled = starting;
+    $("#day").disabled = starting;
   }
 
   function formatDuration(value) { const seconds = Math.round(value); return `${Math.floor(seconds/60)} 分 ${String(seconds%60).padStart(2,"0")} 秒`; }
@@ -236,13 +239,13 @@
     if (fetchingPreflight) return;
     const form = $("#registration-form");
     if (!form?.reportValidity()) return;
-    draft.subject_id = $("#subject-id").value.trim(); draft.day = $("#day").value; draft.round = $("#round").value;
+    draft.subject_id = $("#subject-id").value.trim(); draft.day = $("#day").value;
     if (!draft.subject_id) { notice("请填写被试编号。"); return; }
     fetchingPreflight = true; clearNotice(); updateRegistration();
-    const fingerprint = `${draft.subject_id}|${draft.day}|${draft.round}`;
+    const fingerprint = `${draft.subject_id}|${draft.day}`;
     try {
-      const result = await api("preflight", {subject_id:draft.subject_id,day:Number(draft.day),round:Number(draft.round)});
-      if (fingerprint !== `${draft.subject_id}|${draft.day}|${draft.round}`) return;
+      const result = await api("preflight", {subject_id:draft.subject_id,day:Number(draft.day)});
+      if (fingerprint !== `${draft.subject_id}|${draft.day}`) return;
       preflight = result; preloadRound(array(result.plan)); startRequestId = crypto.randomUUID();
     } catch (error) { preflight = null; notice(error.message); }
     finally { fetchingPreflight = false; updateRegistration(); }
@@ -263,10 +266,11 @@
 
   async function startSession() {
     if (starting || $("#start-button")?.disabled) return;
+    const payload = {subject_id:draft.subject_id,day:Number(draft.day),plan_id:preflight.plan_id,request_id:startRequestId,confirm_retry:draft.confirm_retry,audio_confirmed:draft.audio_confirmed};
     starting = true; clearNotice(); updateRegistration();
     try {
       await synchronizeClock();
-      await api("start", {subject_id:draft.subject_id,day:Number(draft.day),round:Number(draft.round),request_id:startRequestId,confirm_retry:draft.confirm_retry,audio_confirmed:draft.audio_confirmed});
+      await api("start", payload);
       dismissedSession = null;
     } catch (error) { notice(error.message); }
     finally { starting = false; if (!activeSession()) updateRegistration(); }
@@ -391,12 +395,12 @@
     const title = completed ? "本轮采集完成，数据已保存" : session.status === "save_failed" ? "保存失败，请检查已有文件" : session.status === "aborted" ? "本轮已主动中止" : "本轮采集已中断";
     const files = array(session.files).length ? session.files.map((file)=>typeof file === "string" ? file.split(/[\\/]/).pop() : file.name || file.filename || "") : ["eeg_raw.csv","labels.csv","config.json"];
     const descriptions = {"eeg_raw.csv":"两路未经滤波的原始 EEG", "labels.csv":"阶段、媒体事件与量表", "config.json":"本次采集配置与结束摘要"};
-    $("#main-content").innerHTML = `<section class="card"><div class="terminal-body"><div class="terminal-symbol ${completed ? "" : "error"}" aria-hidden="true">${completed ? "✓" : "!"}</div><h2>${esc(title)}</h2><p class="terminal-description">${completed ? `本轮 ${trialCount(session)} 个 trial 与 ${trialCount(session)} 份量表已完成，三文件保存及收尾校验成功。` : esc(session.reason || "实验未完整结束。已写出的数据将保留；再次尝试会创建独立记录。")}</p><div class="result-meta"><span>被试 <strong>${esc(session.subject_id)}</strong></span><span>Day ${esc(session.day)}</span><span>Round ${esc(session.round)}</span><span>${esc(statusLabels[session.status])}</span></div><p class="subtitle" style="margin-bottom:8px">本轮保存目录</p><div class="output-path">${esc(session.output_directory || "目录信息尚不可用")}</div><ul class="file-list">${files.map((file)=>`<li><strong>${esc(file)}</strong><span>${esc(descriptions[file] || "采集数据文件")}</span></li>`).join("")}</ul>${!completed ? `<div class="notice caution">${session.status === "save_failed" ? "写盘失败时无法保证三文件完整，请保留现有文件并检查磁盘或服务日志。" : "这次记录不能视为完整实验。重采需要重新进行 30 秒基线，之前的文件不会覆盖。"}</div>` : ""}<div class="terminal-actions"><button id="new-registration" class="button">登记下一轮 →</button><button id="retry-registration" class="button secondary">重新采集这一轮</button></div></div></section>`;
+    $("#main-content").innerHTML = `<section class="card"><div class="terminal-body"><div class="terminal-symbol ${completed ? "" : "error"}" aria-hidden="true">${completed ? "✓" : "!"}</div><h2>${esc(title)}</h2><p class="terminal-description">${completed ? `本轮 ${trialCount(session)} 个 trial 与 ${trialCount(session)} 份量表已完成，三文件保存及收尾校验成功。` : esc(session.reason || "实验未完整结束。已写出的数据将保留；再次尝试会创建独立记录。")}</p><div class="result-meta"><span>被试 <strong>${esc(session.subject_id)}</strong></span><span>Day ${esc(session.day)}</span><span>${esc(statusLabels[session.status])}</span></div><p class="subtitle" style="margin-bottom:8px">本轮保存目录</p><div class="output-path">${esc(session.output_directory || "目录信息尚不可用")}</div><ul class="file-list">${files.map((file)=>`<li><strong>${esc(file)}</strong><span>${esc(descriptions[file] || "采集数据文件")}</span></li>`).join("")}</ul>${!completed ? `<div class="notice caution">${session.status === "save_failed" ? "写盘失败时无法保证三文件完整，请保留现有文件并检查磁盘或服务日志。" : "这次记录不能视为完整实验。重采需要重新进行 30 秒基线，之前的文件不会覆盖。"}</div>` : ""}<div class="terminal-actions"><button id="new-registration" class="button">登记下一天 →</button><button id="retry-registration" class="button secondary">重新采集当天</button></div></div></section>`;
     $("#new-registration").addEventListener("click", () => {
-      dismissedSession = session.session_id; preflight = null; draft = {subject_id:session.subject_id,day:"",round:"",audio_confirmed:false,confirm_retry:false}; startRequestId = crypto.randomUUID(); clearNotice(); render();
+      dismissedSession = session.session_id; preflight = null; draft = {subject_id:session.subject_id,day:"",audio_confirmed:false,confirm_retry:false}; startRequestId = crypto.randomUUID(); clearNotice(); render();
     });
     $("#retry-registration").addEventListener("click", () => {
-      dismissedSession = session.session_id; preflight = null; draft = {subject_id:session.subject_id,day:String(session.day),round:String(session.round),audio_confirmed:false,confirm_retry:false}; startRequestId = crypto.randomUUID(); clearNotice(); render(); void runPreflight();
+      dismissedSession = session.session_id; preflight = null; draft = {subject_id:session.subject_id,day:String(session.day),audio_confirmed:false,confirm_retry:false}; startRequestId = crypto.randomUUID(); clearNotice(); render(); void runPreflight();
     });
   }
 

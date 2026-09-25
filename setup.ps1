@@ -111,7 +111,7 @@ try {
         Write-Host '[3/4] Checking package compatibility and application imports...'
         & $taskPython -m pip check
         if ($LASTEXITCODE -ne 0) { throw 'Dependency compatibility check failed.' }
-        Write-Host '[4/4] Checking application, configuration and the 16 videos...'
+        Write-Host '[4/4] Checking application, configuration and the 8 videos...'
         & $taskPython $environmentCheck
         if ($LASTEXITCODE -ne 0) { throw 'Application/configuration/media check failed. Read the error above.' }
         Write-Host ''

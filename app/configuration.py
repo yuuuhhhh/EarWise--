@@ -13,9 +13,9 @@ from typing import BinaryIO
 from urllib.parse import quote
 
 
-EXPERIMENT_PROTOCOL_ID = "earwise-3day-2round-4trial-v2"
+EXPERIMENT_PROTOCOL_ID = "earwise-3day-1round-4trial-randomstart-v3"
 TRIALS_PER_ROUND = 4
-ROUNDS_PER_DAY = 2
+ROUNDS_PER_DAY = 1
 
 
 class ConfigurationError(ValueError):
@@ -142,7 +142,7 @@ def _day_round(day, round):
     if type(day) is not int or day not in (1, 2, 3):
         raise ConfigurationError("day 必须为整数 1、2 或 3")
     if type(round) is not int or round not in range(1, ROUNDS_PER_DAY + 1):
-        raise ConfigurationError("round 必须为整数 1 或 2")
+        raise ConfigurationError("每天仅有一轮，round 必须为整数 1")
 
 
 def _media_path(root: Path, relative: str) -> Path:
@@ -164,11 +164,11 @@ def _media_path(root: Path, relative: str) -> Path:
 def validate_manifest(root: Path) -> list[dict]:
     root = Path(root)
     manifest = _json(root / "config" / "video_manifest.json")
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != "2.0":
-        raise ConfigurationError("video_manifest.json 必须为 schema_version=2.0 的对象")
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != "3.0":
+        raise ConfigurationError("video_manifest.json 必须为 schema_version=3.0 的对象")
     entries = manifest.get("trials")
-    if not isinstance(entries, list) or len(entries) != 24:
-        raise ConfigurationError("视频清单必须包含 24 个 trial，覆盖全部 6 个 day × round，每 round 4 个 trial，每 trial 一个视频")
+    if not isinstance(entries, list) or len(entries) != 12:
+        raise ConfigurationError("视频清单必须包含 12 个 trial，覆盖 3 天、每天一轮，每轮 4 个 trial，每 trial 一个视频")
     validated, seen = [], set()
     for entry in entries:
         if not isinstance(entry, dict):
@@ -182,11 +182,12 @@ def validate_manifest(root: Path) -> list[dict]:
         if key in seen:
             raise ConfigurationError(f"视频清单重复：day {day} round {round} trial_order {trial_order}")
         seen.add(key)
-        expected_condition = "attention" if (round + trial_order) % 2 == 0 else "relax"
+        # Manifest order describes the fixed daily pool, not presentation order.
+        expected_condition = "attention" if trial_order % 2 else "relax"
         if condition != expected_condition:
             raise ConfigurationError(f"day {day} round {round} trial_order {trial_order} 的 condition 必须为 {expected_condition}")
-        pair_index = (round - 1) * 2 + (trial_order - 1) // 2 + 1
-        index = (day - 1) * 4 + pair_index if condition == "attention" else pair_index
+        pair_index = (trial_order - 1) // 2 + 1
+        index = (day - 1) * 2 + pair_index if condition == "attention" else pair_index
         relative = f"{condition}_video/{index:02d}.mp4"
         video_id = f"{condition}_{index:02d}"
         video = entry.get("video")
@@ -202,7 +203,7 @@ def validate_manifest(root: Path) -> list[dict]:
                 for round in range(1, ROUNDS_PER_DAY + 1)
                 for trial_order in range(1, TRIALS_PER_ROUND + 1)}
     if seen != expected:
-        raise ConfigurationError("视频清单必须完整覆盖 3 天、每天 2 个 round、每 round 4 个 trial")
+        raise ConfigurationError("视频清单必须完整覆盖 3 天、每天一轮、每轮 4 个 trial")
     return validated
 
 
@@ -302,13 +303,40 @@ def _video_metadata(root: Path, video: dict, *, with_hash: bool) -> dict:
     return result
 
 
-def plan_for(root: Path, day: int, round: int) -> list[dict]:
+def randomization_for(subject_id: str, day: int) -> dict:
+    """Reproducible random first condition; retries preserve the daily order."""
+    subject = validate_subject(subject_id).casefold()
+    _day_round(day, 1)
+    identity = json.dumps([EXPERIMENT_PROTOCOL_ID, subject, day], ensure_ascii=False, separators=(",", ":"))
+    seed = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return {"method": "sha256-subject-day-first-condition-v1", "seed": seed,
+            "first_condition": "attention" if int(seed[-1], 16) % 2 == 0 else "relax",
+            "retry_policy": "reuse-subject-day"}
+
+
+def plan_fingerprint(subject_id: str, day: int, plan: list[dict]) -> str:
+    """Bind a reviewed order and its media metadata to one protocol identity."""
+    subject = validate_subject(subject_id).casefold()
+    _day_round(day, 1)
+    payload = {"experiment_protocol_id": EXPERIMENT_PROTOCOL_ID, "subject_id": subject,
+               "day": day, "plan": plan}
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def plan_for(root: Path, day: int, round: int = 1, *, subject_id: str) -> list[dict]:
     _day_round(day, round)
+    randomization = randomization_for(subject_id, day)
     matched = [entry for entry in validate_manifest(root)
                if entry["day"] == day and entry["round"] == round]
-    return [{"condition": entry["condition"], "trial_order": entry["trial_order"],
+    first = randomization["first_condition"]
+    conditions = (first, "relax" if first == "attention" else "attention")
+    pools = {condition: sorted((entry for entry in matched if entry["condition"] == condition),
+                              key=lambda entry: entry["trial_order"]) for condition in conditions}
+    ordered = [pools[condition][pair] for pair in range(2) for condition in conditions]
+    return [{"condition": entry["condition"], "trial_order": index,
              "video": _video_metadata(Path(root), entry["video"], with_hash=True)}
-            for entry in sorted(matched, key=lambda trial: trial["trial_order"])]
+            for index, entry in enumerate(ordered, 1)]
 
 
 def media_catalog(root: Path) -> list[dict]:

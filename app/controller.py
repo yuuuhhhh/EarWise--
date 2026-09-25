@@ -15,7 +15,8 @@ from pathlib import Path
 
 from . import __version__
 from .configuration import (EXPERIMENT_PROTOCOL_ID, ROUNDS_PER_DAY, TRIALS_PER_ROUND,
-                            load_settings, media_catalog, plan_for, validate_subject, validate_manifest)
+                            load_settings, media_catalog, plan_for, plan_fingerprint, randomization_for,
+                            validate_subject, validate_manifest)
 from .device import RealDevice, SimulatedDevice
 from .protocol import FrameParser
 from .quality import QualityTracker, ALGORITHM_VERSION
@@ -243,9 +244,9 @@ class Controller:
     @staticmethod
     def identity(body):
         subject = validate_subject(body.get('subject_id', ''))
-        day, rnd = body.get('day'), body.get('round')
+        day, rnd = body.get('day'), body.get('round', 1)
         if type(day) is not int or day not in (1, 2, 3) or type(rnd) is not int or rnd not in range(1, ROUNDS_PER_DAY + 1):
-            raise ExperimentError('请选择合法的天数（1–3）和 round（1–2）')
+            raise ExperimentError('请选择合法的天数（1–3）；每天仅采集一轮，round 只能为 1')
         return subject, day, rnd
 
     def attempts(self, subject, day, rnd):
@@ -256,8 +257,8 @@ class Controller:
         for path in parent.glob('*/config.json'):
             try:
                 value = json.loads(path.read_text(encoding='utf-8'))
-                # Round numbers were regrouped in v2. Old two-trial attempts
-                # must not count as completion or retry ancestry for this plan.
+                # Earlier protocols used different daily videos and round counts.
+                # Do not treat those attempts as completion or retry ancestry.
                 if value.get('experiment_protocol_id') != EXPERIMENT_PROTOCOL_ID:
                     continue
                 result.append({**{k: value.get(k) for k in ('session_id', 'started_at_utc', 'attempt_number')}, 'status': value.get('session_status')})
@@ -277,8 +278,10 @@ class Controller:
             raise ExperimentError('页面标识无效，请刷新设备检查页')
         if name == 'preflight':
             subject, day, rnd = self.identity(body)
-            plan = await asyncio.to_thread(plan_for, self.root, day, rnd)
-            return dict(plan=plan, previous_attempts=self.attempts(subject, day, rnd), errors=list(self.preflight_errors))
+            plan = await asyncio.to_thread(plan_for, self.root, day, rnd, subject_id=subject)
+            return dict(plan=plan, plan_id=plan_fingerprint(subject, day, plan),
+                        randomization=randomization_for(subject, day),
+                        previous_attempts=self.attempts(subject, day, rnd), errors=list(self.preflight_errors))
         if name == 'browser_probe':
             probes = body.get('videos', [])
             valid = {}
@@ -289,7 +292,7 @@ class Controller:
                     valid[p['video_id']] = p
             self.probes[cid] = valid
             if len(valid) != len(self.catalog) or not valid:
-                raise ExperimentError('浏览器素材检查未通过：需要完整 16 个视频可解码且时长一致')
+                raise ExperimentError(f'浏览器素材检查未通过：需要完整 {len(self.catalog)} 个视频可解码且时长一致')
             return {}
         if name == 'sync':
             for key in ('client_midpoint_ms', 'server_monotonic_ns', 'rtt_ms'):
@@ -369,9 +372,13 @@ class Controller:
         prior = self.attempts(subject, day, rnd)
         if any(p['status'] == 'completed' for p in prior) and body.get('confirm_retry') is not True:
             raise ExperimentError('本轮已有完成记录，请确认重采；新记录不会覆盖原记录')
-        plan = await asyncio.to_thread(plan_for, self.root, day, rnd)
+        plan = await asyncio.to_thread(plan_for, self.root, day, rnd, subject_id=subject)
         if len(plan) != TRIALS_PER_ROUND or [item.get('trial_order') for item in plan] != list(range(1, TRIALS_PER_ROUND + 1)):
             raise ExperimentError('当前协议要求每轮 4 个按顺序排列的 trial，请检查视频清单')
+        plan_id = plan_fingerprint(subject, day, plan)
+        if body.get('plan_id') != plan_id:
+            raise ExperimentError('当天计划尚未检查或已经变化，请重新检查计划后再开始')
+        randomization = randomization_for(subject, day)
         catalog_by_id = {video['video_id']: video for video in self.catalog}
         for item in plan:
             video = item['video']
@@ -392,6 +399,7 @@ class Controller:
         snap['algorithm_versions']['packet_loss'] = ALGORITHM_VERSION
         snap.update(session_id=session_id, subject_id=subject, day=day, round=rnd, attempt_number=len(prior)+1,
                     experiment_protocol_id=EXPERIMENT_PROTOCOL_ID,
+                    plan_id=plan_id, randomization=copy.deepcopy(randomization),
                     retry_of_session_id=prior[-1]['session_id'] if prior else None,
                     software_version=__version__, python_version=platform.python_version(), platform=platform.platform(),
                     dependency_versions={name: importlib.metadata.version(name) for name in ('tornado', 'bleak')},
@@ -417,6 +425,7 @@ class Controller:
         self._failure_totals = None
         self.session = dict(session_id=session_id, subject_id=subject, day=day, round=rnd, controller_id=cid,
                             experiment_protocol_id=EXPERIMENT_PROTOCOL_ID,
+                            plan_id=plan_id, randomization=copy.deepcopy(randomization),
                             status='recording', stage='', trials=trials, trial_index=0, current_trial=None,
                             started_monotonic_ns=now, started_at_utc=self.utc(now), baseline_end_ns=now+int(30e9),
                             output_directory=str(directory), files=snap['files'], reason='')

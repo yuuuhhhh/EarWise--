@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest.mock import Mock
 
-from app.configuration import EXPERIMENT_PROTOCOL_ID
+from app.configuration import EXPERIMENT_PROTOCOL_ID, plan_fingerprint, randomization_for
 from app.recorder import Recorder, recover_sessions, atomic_json, EEG_FIELDS, LABEL_FIELDS
 
 
@@ -20,15 +20,36 @@ class RecorderTests(unittest.TestCase):
         self.directory = self.root / "sub_001" / "day_01" / "round_01" / "session-test"
         self.failures = []
         self.failed = threading.Event()
-        self.snapshot = dict(schema_version="1.0", session_id="session-test", subject_id="001",
-                             experiment_protocol_id=EXPERIMENT_PROTOCOL_ID, round=1,
-                             session_status="recording", started_monotonic_ns=1000,
-                             trials=[dict(trial_id=f"t{index}", trial_order=index,
-                                          condition="attention" if index % 2 else "relax",
-                                          video={"video_id": f"video-{index}"},
-                                          completed=True, rating_submitted=True) for index in range(1, 5)],
-                             summary={}, termination_reason="")
+        self.snapshot = self.planned_snapshot(day=1, first="attention")
         self.recorder = None
+
+    def planned_snapshot(self, *, day, first):
+        subject = next(f"recorder-{first}-{number}" for number in range(100)
+                       if randomization_for(f"recorder-{first}-{number}", day)["first_condition"] == first)
+        randomization = randomization_for(subject, day)
+        plan = []
+        conditions = (first, "relax" if first == "attention" else "attention")
+        for order in range(1, 5):
+            condition = conditions[(order - 1) % 2]
+            video_index = (order - 1) // 2 + 1 + ((day - 1) * 2 if condition == "attention" else 0)
+            path = f"{condition}_video/{video_index:02d}.mp4"
+            plan.append(dict(condition=condition, trial_order=order,
+                             video=dict(video_id=f"{condition}_{video_index:02d}", path=path,
+                                        filename=f"{video_index:02d}.mp4", url=f"/media/{path}",
+                                        duration_seconds=4.0, codecs=["avc1", "mp4a"], size_bytes=100,
+                                        mtime_ns=100, ctime_ns=100, sha256="a" * 64)))
+        return dict(schema_version="1.0", session_id="session-test", subject_id=subject,
+                    experiment_protocol_id=EXPERIMENT_PROTOCOL_ID, day=day, round=1,
+                    randomization=randomization, plan_id=plan_fingerprint(subject, day, plan),
+                    session_status="recording", started_monotonic_ns=1000,
+                    trials=[dict(item, trial_id=f"t{item['trial_order']}", completed=True,
+                                 rating_submitted=True) for item in plan],
+                    summary={}, termination_reason="")
+
+    def refresh_plan_id(self, snapshot):
+        plan = [{key: trial[key] for key in ("condition", "trial_order", "video")}
+                for trial in snapshot["trials"]]
+        snapshot["plan_id"] = plan_fingerprint(snapshot["subject_id"], snapshot["day"], plan)
 
     def tearDown(self):
         if self.recorder and not self.recorder.closed:
@@ -105,16 +126,22 @@ class RecorderTests(unittest.TestCase):
             condition = "attention" if index % 2 else "relax"
             self.assertEqual(ratings[f"t{index}"][f"{condition}_score"], str(index))
             self.assertEqual(ratings[f"t{index}"]["confidence_score"], str(5 - index))
-            self.assertEqual(ratings[f"t{index}"]["video_id"], f"video-{index}")
+            self.assertEqual(ratings[f"t{index}"]["video_id"], f"{condition}_{(index - 1) // 2 + 1:02d}")
+        persisted = json.loads((self.directory / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(persisted["randomization"], self.snapshot["randomization"])
+        self.assertEqual(persisted["plan_id"], self.snapshot["plan_id"])
         self.assertEqual(self.failures, [])
 
-    def test_even_round_completes_with_relax_attention_relax_attention(self):
-        self.snapshot["round"] = 2
-        for trial in self.snapshot["trials"]:
-            trial["condition"] = "relax" if trial["trial_order"] % 2 else "attention"
-        self.initialize()
-        self.complete_rows()
-        self.assertEqual(self.recorder.finish(self.terminal(), True)["session_status"], "completed")
+    def test_both_random_first_conditions_complete_on_all_three_days(self):
+        for day in (1, 2, 3):
+            for first in ("attention", "relax"):
+                with self.subTest(day=day, first=first):
+                    self.directory = self.directory.with_name(f"day-{day}-{first}")
+                    self.snapshot = self.planned_snapshot(day=day, first=first)
+                    self.initialize()
+                    self.complete_rows()
+                    result = self.recorder.finish(self.terminal(), True)
+                    self.assertEqual(result["session_status"], "completed", result["termination_reason"])
 
     def test_only_two_finished_trials_cannot_complete_round(self):
         self.initialize()
@@ -144,7 +171,7 @@ class RecorderTests(unittest.TestCase):
     def test_snapshot_duplicate_identity_wrong_order_or_wrong_condition_fails(self):
         variants = (
             ("duplicate-trial", lambda trials: trials[2].update(trial_id="t1")),
-            ("duplicate-video", lambda trials: trials[2]["video"].update(video_id="video-1")),
+            ("duplicate-video", lambda trials: trials[2]["video"].update(video_id="attention_01")),
             ("wrong-order", lambda trials: trials[2].update(trial_order=1)),
             ("wrong-condition", lambda trials: trials[2].update(condition="relax")),
         )
@@ -161,7 +188,7 @@ class RecorderTests(unittest.TestCase):
 
     def test_persisted_trial_metadata_cannot_point_to_other_same_condition_trial(self):
         for kind in ("TRIAL_START", "TRIAL_END", "RATING_SUBMITTED"):
-            for field, value in (("trial_order", 1), ("video_id", "video-1"), ("condition", "relax")):
+            for field, value in (("trial_order", 1), ("video_id", "attention_01"), ("condition", "relax")):
                 with self.subTest(kind=kind, field=field):
                     self.directory = self.directory.with_name(f"wrong-{kind}-{field}")
                     self.initialize()
@@ -196,24 +223,102 @@ class RecorderTests(unittest.TestCase):
         self.assertIn("提交顺序", result["termination_reason"])
 
     def test_unknown_protocol_cannot_be_marked_completed(self):
-        self.initialize()
-        self.complete_rows()
-        terminal = self.terminal()
-        terminal["experiment_protocol_id"] = "legacy-two-trial"
-        self.assertEqual(self.recorder.finish(terminal, True)["session_status"], "save_failed")
+        for protocol in ("legacy-two-trial", "earwise-3day-2round-4trial-v2"):
+            with self.subTest(protocol=protocol):
+                self.directory = self.directory.with_name(protocol)
+                self.initialize()
+                self.complete_rows()
+                terminal = self.terminal()
+                terminal["experiment_protocol_id"] = protocol
+                self.assertEqual(self.recorder.finish(terminal, True)["session_status"], "save_failed")
 
-    def test_round_three_and_four_cannot_be_marked_completed(self):
-        for rnd in (3, 4):
+    def test_round_must_be_exact_integer_one(self):
+        for rnd in (0, 2, 3, 4, True, 1.0, "1", None):
             with self.subTest(round=rnd):
                 self.directory = self.directory.with_name(f"invalid-round-{rnd}")
                 self.snapshot["round"] = rnd
-                for trial in self.snapshot["trials"]:
-                    trial["condition"] = "attention" if (rnd + trial["trial_order"]) % 2 == 0 else "relax"
                 self.initialize()
                 self.complete_rows()
                 result = self.recorder.finish(self.terminal(), True)
                 self.assertEqual(result["session_status"], "save_failed")
                 self.assertIn("round 编号", result["termination_reason"])
+
+    def test_day_must_be_exact_integer_in_three_day_protocol(self):
+        for day in (0, 4, True, 1.0, "1", None):
+            with self.subTest(day=day):
+                self.directory = self.directory.with_name(f"invalid-day-{day}")
+                self.initialize()
+                self.complete_rows()
+                terminal = self.terminal()
+                terminal["day"] = day
+                result = self.recorder.finish(terminal, True)
+                self.assertEqual(result["session_status"], "save_failed")
+                self.assertIn("day 编号", result["termination_reason"])
+
+    def test_randomization_metadata_must_match_subject_and_day(self):
+        mutations = (
+            ("missing", lambda snapshot: snapshot.pop("randomization")),
+            ("method", lambda snapshot: snapshot["randomization"].update(method="untracked")),
+            ("seed", lambda snapshot: snapshot["randomization"].update(seed="0" * 64)),
+            ("first", lambda snapshot: snapshot["randomization"].update(first_condition="relax")),
+            ("retry", lambda snapshot: snapshot["randomization"].update(retry_policy="reroll")),
+            ("subject", lambda snapshot: snapshot.update(subject_id="another-subject")),
+            ("day", lambda snapshot: snapshot.update(day=2)),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                self.directory = self.directory.with_name(f"invalid-randomization-{name}")
+                self.initialize()
+                self.complete_rows()
+                terminal = self.terminal()
+                mutate(terminal)
+                result = self.recorder.finish(terminal, True)
+                self.assertEqual(result["session_status"], "save_failed")
+                self.assertIn("随机顺序", result["termination_reason"])
+
+    def test_plan_fingerprint_detects_video_metadata_changes(self):
+        mutations = (
+            ("missing", lambda snapshot: snapshot.pop("plan_id")),
+            ("mismatched", lambda snapshot: snapshot.update(plan_id="0" * 64)),
+            ("video-sha", lambda snapshot: snapshot["trials"][0]["video"].update(sha256="b" * 64)),
+            ("video-duration", lambda snapshot: snapshot["trials"][0]["video"].update(duration_seconds=8.0)),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                self.directory = self.directory.with_name(f"invalid-plan-{name}")
+                self.initialize()
+                self.complete_rows()
+                terminal = self.terminal()
+                mutate(terminal)
+                result = self.recorder.finish(terminal, True)
+                self.assertEqual(result["session_status"], "save_failed")
+                self.assertIn("播放计划指纹", result["termination_reason"])
+
+    def test_valid_fingerprint_cannot_authorize_wrong_day_videos_or_pair_order(self):
+        for variant in ("wrong-day", "swapped-pairs", "wrong-path", "wrong-filename"):
+            with self.subTest(variant=variant):
+                self.directory = self.directory.with_name(f"invalid-media-{variant}")
+                self.snapshot = self.planned_snapshot(day=2, first="attention")
+                trials = self.snapshot["trials"]
+                if variant == "wrong-day":
+                    for trial in trials:
+                        if trial["condition"] == "attention":
+                            index = (trial["trial_order"] - 1) // 2 + 1
+                            trial["video"].update(video_id=f"attention_{index:02d}",
+                                                  path=f"attention_video/{index:02d}.mp4",
+                                                  filename=f"{index:02d}.mp4")
+                elif variant == "swapped-pairs":
+                    trials[0]["video"], trials[2]["video"] = trials[2]["video"], trials[0]["video"]
+                elif variant == "wrong-path":
+                    trials[0]["video"]["path"] = "attention_video/09.mp4"
+                else:
+                    trials[0]["video"]["filename"] = "09.mp4"
+                self.refresh_plan_id(self.snapshot)
+                self.initialize()
+                self.complete_rows()
+                result = self.recorder.finish(self.terminal(), True)
+                self.assertEqual(result["session_status"], "save_failed")
+                self.assertIn("当天视频素材", result["termination_reason"])
 
     def test_barrier_persists_questionnaire_before_return(self):
         self.initialize()

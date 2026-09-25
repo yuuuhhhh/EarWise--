@@ -30,9 +30,9 @@ def main():
     load_settings(ROOT)
     validate_manifest(ROOT)
     catalog = media_catalog(ROOT)
-    if len(catalog) != 16:
-        raise ValueError(f"Expected 16 videos, got {len(catalog)}")
-    print(f"Application imports, configuration and videos: OK ({len(catalog)}/16)")
+    if len(catalog) != 8:
+        raise ValueError(f"Expected 8 videos, got {len(catalog)}")
+    print(f"Application imports, configuration and videos: OK ({len(catalog)}/8)")
     return 0
 
 

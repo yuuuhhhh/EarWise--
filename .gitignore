@@ -13,3 +13,13 @@ work/
 .vscode/
 Thumbs.db
 .DS_Store
+
+# Unused original stimuli stay local; the current protocol ships eight videos.
+/attention_video/07.mp4
+/attention_video/08.mp4
+/attention_video/09.mp4
+/attention_video/10.mp4
+/attention_video/11.mp4
+/attention_video/12.mp4
+/relax_video/03.mp4
+/relax_video/04.mp4

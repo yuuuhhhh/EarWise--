@@ -45,6 +45,9 @@ class HttpTests(AsyncHTTPTestCase):
         self.media_bytes = bytes(range(64))
         (self.root / "attention_video" / "01.mp4").write_bytes(self.media_bytes)
         (self.root / "attention_video" / "99.mp4").write_bytes(b"unlisted-media")
+        (self.root / "attention_video" / "07.mp4").write_bytes(b"retired-attention")
+        (self.root / "relax_video").mkdir()
+        (self.root / "relax_video" / "03.mp4").write_bytes(b"retired-relax")
         (self.root / "private.txt").write_bytes(b"never-serve-this")
         self.controller = FakeController()
         self.root_patch = patch.object(main, "ROOT", self.root)
@@ -118,7 +121,7 @@ class HttpTests(AsyncHTTPTestCase):
         self.assertEqual(updated.body.decode("utf-8"), updated_html)
 
     def test_unlisted_media_and_arbitrary_project_files_are_not_served(self):
-        for route in ("/media/attention_video/99.mp4", "/media/private.txt", "/private.txt",
+        for route in ("/media/attention_video/99.mp4", "/media/attention_video/07.mp4", "/media/relax_video/03.mp4", "/media/private.txt", "/private.txt",
                       "/media/%2e%2e/private.txt", "/media/attention_video/%2e%2e/%2e%2e/private.txt"):
             with self.subTest(route=route):
                 response = self.fetch(route)

@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from app.configuration import EXPERIMENT_PROTOCOL_ID, ROUNDS_PER_DAY, TRIALS_PER_ROUND
+from app.configuration import EXPERIMENT_PROTOCOL_ID, TRIALS_PER_ROUND, plan_fingerprint, randomization_for
 
 EEG_FIELDS = ['session_id', 'sample_row_index', 'stream_epoch_id', 'notification_id',
               'frame_in_notification', 'device_seq', 'received_at_utc',
@@ -198,13 +198,31 @@ class Recorder:
             if (any(not isinstance(value, str) or not value for value in trial_ids + video_ids)
                     or len(set(trial_ids)) != TRIALS_PER_ROUND or len(set(video_ids)) != TRIALS_PER_ROUND):
                 raise OSError('trial 身份或视频身份校验失败：每个 trial 和视频必须唯一')
-            rnd = snapshot.get('round')
-            if type(rnd) is not int or rnd not in range(1, ROUNDS_PER_DAY + 1):
+            rnd, day = snapshot.get('round'), snapshot.get('day')
+            if type(rnd) is not int or rnd != 1:
                 raise OSError('round 编号校验失败')
-            conditions = ('attention', 'relax') if rnd % 2 else ('relax', 'attention')
+            if type(day) is not int or day not in (1, 2, 3):
+                raise OSError('day 编号校验失败')
+            randomization = randomization_for(snapshot.get('subject_id'), day)
+            if snapshot.get('randomization') != randomization:
+                raise OSError('随机顺序元数据校验失败')
+            first = randomization['first_condition']
+            conditions = (first, 'relax' if first == 'attention' else 'attention')
             for index, trial in enumerate(trials, 1):
                 if type(trial.get('trial_order')) is not int or trial['trial_order'] != index or trial.get('condition') != conditions[(index - 1) % 2]:
                     raise OSError('trial 顺序或交替条件校验失败')
+                condition = trial['condition']
+                video_index = (index - 1) // 2 + 1
+                if condition == 'attention':
+                    video_index += (day - 1) * 2
+                video = trial['video']
+                if (video.get('video_id') != f'{condition}_{video_index:02d}'
+                        or video.get('path') != f'{condition}_video/{video_index:02d}.mp4'
+                        or video.get('filename') != f'{video_index:02d}.mp4'):
+                    raise OSError('当天视频素材或同条件视频顺序校验失败')
+            plan = [{key: trial[key] for key in ('condition', 'trial_order', 'video')} for trial in trials]
+            if snapshot.get('plan_id') != plan_fingerprint(snapshot['subject_id'], day, plan):
+                raise OSError('播放计划指纹校验失败')
             types = [e[0] for e in events]
             required = {'SESSION_START': 1, 'SESSION_END': 1, 'BASELINE_START': 1,
                         'BASELINE_END': 1, 'TRIAL_START': TRIALS_PER_ROUND,
