@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app.controller import Controller, ExperimentError
 from app.configuration import EXPERIMENT_PROTOCOL_ID, randomization_for
@@ -147,6 +147,30 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         rating = self.body(trial_id=self.controller.session["current_trial"]["trial_id"], score=score, confidence_score=4)
         await self.controller.action("rating", rating)
         return rating
+
+    async def use_real_controller(self, *, connected=True):
+        """Exercise the real-mode pipeline with injected frames, without BLE hardware."""
+        await self.controller.close()
+        settings = copy.deepcopy(self.settings)
+        settings["channel_mapping"] = {"channel_0": None, "channel_1": None, "verified": False}
+        settings["validations"] = {key: False for key in (
+            "commands_verified", "sample_rate_verified", "saturation_verified")}
+        settings["uv_verified"] = False
+        settings["nominal_sample_rate"] = 250
+        with patch("app.controller.load_settings", return_value=settings):
+            self.controller = Controller(self.root, simulate=False, clock=self.clock)
+        await self.controller.initialize()
+        self.assertEqual(self.controller.mode, "real")
+        self.assertIsInstance(self.controller.device, RealDevice)
+        if connected:
+            self.controller.device._set_status("connected", "测试注入连接状态；未调用蓝牙连接")
+            self.feed()
+        await self.controller.action("browser_probe", {"client_id": OWNER, "videos": [
+            {"video_id": video["video_id"], "playable": True, "duration_seconds": video["duration_seconds"]}
+            for video in mock_catalog()]})
+        await self.controller.action("sync", dict(client_id=OWNER, client_midpoint_ms=1000,
+                                                  server_monotonic_ns=self.clock(), rtt_ms=4))
+        self.sync_offset_ns = self.clock() - 1000_000_000
 
     async def test_both_random_start_orders_have_exact_three_auditable_files(self):
         cases = [(rnd, order) for rnd in (1, 2, 3) for order in (
@@ -422,25 +446,107 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=3)
                 await self.controller.action("abort", self.body())
 
-    async def test_real_mode_blocks_unverified_hardware_without_simulation_fallback(self):
-        real = Controller(self.root, simulate=False, clock=self.clock)
-        try:
-            await real.initialize()
-            real.on_status("connected", "仅为测试注入连接状态，没有调用蓝牙连接")
-            real.on_data(encode_frame(1, 100, -200))
-            self.assertEqual(real.mode, "real")
-            self.assertIsInstance(real.device, RealDevice)
-            errors = "；".join(real.readiness_errors())
-            for required in ("左右耳映射", "原始模式命令", "名义采样率", "ADC 削顶定义"):
-                self.assertIn(required, errors)
-            with self.assertRaises(ExperimentError):
-                await real.action("start", dict(client_id=OWNER, subject_id="001", round=1,
-                                                 request_id="real-unverified-start", audio_confirmed=True))
-            self.assertIsNone(real.session)
-            self.assertIsNone(real.recorder)
-            self.assertEqual(list(real.data_root.rglob("config.json")), [])
-        finally:
-            await real.close()
+    async def test_real_mode_unverified_metadata_allows_complete_round_without_simulation_fallback(self):
+        await self.use_real_controller()
+        self.assertEqual(self.controller.readiness_errors(), [])
+        await self.start(2, subject_id="real-test")
+        # Known bytes travel through the actual RealDevice notification callback,
+        # parser, controller and disk writer; no simulator is ever connected.
+        injected_frame = encode_frame(self.sequence, 123456, -654321)
+        self.controller.device._on_notification(None, injected_frame)
+        self.sequence = (self.sequence + 1) % 256
+        await self.advance(29.75)
+        self.assertEqual(self.controller.session["stage"], "baseline")
+        await self.advance(.25)
+        self.assertEqual(self.controller.session["stage"], "transition")
+        scores = (2, 5, 1, 4)
+        for score in scores:
+            await self.complete_trial(score)
+        self.assertEqual(self.controller.session["status"], "completed")
+        self.assertIsInstance(self.controller.device, RealDevice)
+        directory = Path(self.controller.session["output_directory"])
+        self.assertEqual(directory.parent, self.root / "data" / "sub_real-test" / "round_02")
+        self.assertEqual({p.name for p in directory.iterdir()}, {"eeg_raw.csv", "labels.csv", "config.json"})
+        eeg, labels, config = self.read_outputs()
+        self.assertEqual(config["mode"], "real")
+        self.assertEqual(config["session_status"], "completed")
+        self.assertEqual(config["nominal_sample_rate"], 250)
+        self.assertEqual(config["channel_mapping"], {"channel_0": None, "channel_1": None, "verified": False})
+        self.assertEqual(config["validations"], {"commands_verified": False, "sample_rate_verified": False,
+                                                "saturation_verified": False})
+        self.assertFalse(config["uv_verified"])
+        self.assertEqual(config["commands"], ["b"])
+        self.assertGreater(len(eeg), 1)
+        self.assertEqual((eeg[0]["channel_0_raw"], eeg[0]["channel_1_raw"]), ("123456", "-654321"))
+        self.assertEqual(eeg[0]["original_frame_hex"], injected_frame.hex())
+        self.assertTrue(all(int(row["channel_0_raw"]) == 100 + int(row["device_seq"])
+                            and int(row["channel_1_raw"]) == -200 - int(row["device_seq"])
+                            for row in eeg[1:]))
+        self.assertTrue(all(row["channel_0_uv"] == row["channel_1_uv"] == "" for row in eeg))
+        self.assertTrue(all(row["subject_id"] == "real-test" and row["round"] == "2" for row in eeg + labels))
+        self.assertEqual(config["round"], 2)
+        self.assertEqual(config["subject_id"], "real-test")
+        self.assertNotIn("day", config)
+        self.assertEqual(config["summary"]["actual_rows"], len(eeg))
+        self.assertEqual(config["summary"]["questionnaires_submitted"], 4)
+        self.assertTrue(all(trial["completed"] and trial["rating_submitted"] for trial in config["trials"]))
+        for event, count in (("BASELINE_START", 1), ("BASELINE_END", 1), ("TRIAL_START", 4),
+                             ("TRIAL_END", 4), ("RATING_SUBMITTED", 4)):
+            self.assertEqual(sum(row["event_type"] == event for row in labels), count)
+        baseline_start = next(row for row in labels if row["event_type"] == "BASELINE_START")
+        baseline_end = next(row for row in labels if row["event_type"] == "BASELINE_END")
+        self.assertEqual(int(baseline_end["event_monotonic_ns"]) - int(baseline_start["event_monotonic_ns"]),
+                         30_000_000_000)
+        ratings = [row for row in labels if row["event_type"] == "RATING_SUBMITTED"]
+        for index, row in enumerate(ratings):
+            trial = config["trials"][index]
+            self.assertEqual((row["condition"], row["trial_id"], row["video_id"]),
+                             (trial["condition"], trial["trial_id"], trial["video"]["video_id"]))
+            self.assertEqual(row[f"{row['condition']}_score"], str(scores[index]))
+
+    async def test_real_mode_still_requires_connection_recent_frames_and_usable_storage(self):
+        await self.use_real_controller(connected=False)
+        preview = await self.controller.action("preflight", self.body(subject_id="001", round=1))
+        request = self.body(subject_id="001", round=1, request_id="real-readiness-start",
+                            audio_confirmed=True, plan_id=preview["plan_id"])
+
+        async def assert_blocked(message):
+            with self.assertRaisesRegex(ExperimentError, message):
+                await self.controller.action("start", request)
+            self.assertIsNone(self.controller.session)
+            self.assertIsNone(self.controller.recorder)
+            self.assertFalse(list(self.controller.data_root.rglob("config.json")))
+
+        await assert_blocked("请先连接耳机")
+        self.controller.device._set_status("connected", "测试连接无数据")
+        await assert_blocked("等待近期有效脑电数据")
+        self.feed()
+        self.clock.advance(self.settings["data_timeout_seconds"] + .01)
+        await assert_blocked("等待近期有效脑电数据")
+        self.feed()
+        self.controller.storage_error = "输出目录不可写：测试权限错误"
+        await assert_blocked("输出目录不可写")
+        self.controller.storage_error = None
+        self.controller.preflight_errors = ["素材配置检查失败：测试无效视频"]
+        await assert_blocked("素材配置检查失败")
+        self.controller.preflight_errors = []
+        self.assertEqual(self.controller.readiness_errors(), [])
+
+    async def test_real_b_command_does_not_start_or_create_recording_files(self):
+        await self.use_real_controller(connected=False)
+        self.controller.device._set_status("connected", "测试连接无数据")
+        with patch.object(self.controller.device, "command", new=AsyncMock()) as command:
+            await self.controller.action("command", self.body(command="b"))
+        command.assert_awaited_once_with("b")
+        self.assertIsNone(self.controller.session)
+        self.assertIsNone(self.controller.recorder)
+        self.assertFalse(list(self.controller.data_root.rglob("config.json")))
+        self.assertIn("等待近期有效脑电数据", self.controller.readiness_errors())
+        self.controller.device._on_notification(None, encode_frame(1, 100, -200))
+        self.assertEqual(self.controller.readiness_errors(), [])
+        self.assertIsNone(self.controller.session)
+        self.assertFalse(list(self.controller.data_root.rglob("config.json")))
+        self.assertIsInstance(self.controller.device, RealDevice)
 
     async def test_first_config_already_contains_start_clock_for_crash_recovery(self):
         await self.start()

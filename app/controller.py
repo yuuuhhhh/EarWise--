@@ -225,12 +225,8 @@ class Controller:
             errors.append('请先连接耳机并启动数据预览' if not self.simulate else '请先连接模拟数据预览')
         if self.quality.snapshot(self.clock()).get('data_status') != 'receiving':
             errors.append('等待近期有效脑电数据')
-        if not self.simulate:
-            if not self.settings['channel_mapping']['verified']:
-                errors.append('左右耳映射尚未确认，请在 config/settings.json 中核对后重启')
-            for field, label in [('commands_verified', '原始模式命令'), ('sample_rate_verified', '名义采样率'), ('saturation_verified', 'ADC 削顶定义')]:
-                if not self.settings['validations'].get(field):
-                    errors.append(label + '尚未实机验证')
+        # Hardware interpretation metadata is preserved in each snapshot, but
+        # unknown ear mapping or quality thresholds do not block raw capture.
         return errors
 
     def state(self):

@@ -176,7 +176,7 @@
       <div id="previous-attempts"></div><div class="checklist"><div id="media-check" class="check-item pending"></div><div id="device-check" class="check-item pending"></div></div><div style="margin-top:15px"><button class="button secondary" id="connect-button">连接设备并预览</button></div><div id="readiness-errors"></div>
       <label class="checkbox-row"><input type="checkbox" id="audio-confirmed" ${draft.audio_confirmed ? "checked" : ""}><span>已确认电脑的声音输出、音量及视频原有音轨可听见。</span></label>
     </div><div class="start-footer"><p>开始后连续保存两路原始 EEG。<br>请保持页面打开，直至采集结束。</p><button id="start-button" class="button" disabled>开始 30 秒基线采集 <span aria-hidden="true">→</span></button></div></section>
-    <details class="commissioning" id="commissioning"><summary>实验负责人 · 设备联调与参数核对</summary><div class="commissioning-body"><p>真实设备的命令、采样率、左右耳映射与 ADC 削顶参数须经实机确认，并在 <span class="code-path">config/settings.json</span> 中记录。以下联调命令只在未采集时可用。</p><div class="command-row"><button class="button quiet" data-command="b">发送小写 b</button><button class="button quiet" data-command="S">发送 S</button><button class="button quiet" data-command="R">发送 R</button><button class="button quiet" data-command="I">发送 I</button></div><p style="margin:12px 0 0">以上字节来自参考脚本；按钮不代表硬件含义已验证。不要同时运行原始蓝牙脚本。</p></div></details>`;
+    <details class="commissioning" id="commissioning"><summary>实验负责人 · 设备联调与参数核对</summary><div class="commissioning-body"><p>连接后如未收到数据，可点击“发送小写 b”。正常接收后，点击上方“开始 30 秒基线采集”。左右耳未知时仍按通道 0/1 保存；参数确认状态会随数据记录，不影响原始数据采集。参数可在 <span class="code-path">config/settings.json</span> 中核对，以下命令只在未采集时可用。</p><div class="command-row"><button class="button quiet" data-command="b">发送小写 b</button><button class="button quiet" data-command="S">发送 S</button><button class="button quiet" data-command="R">发送 R</button><button class="button quiet" data-command="I">发送 I</button></div><p style="margin:12px 0 0">以上字节来自参考脚本；发送命令不会自动修改参数确认状态。不要同时运行原始蓝牙脚本。</p></div></details>`;
     $("#registration-form").addEventListener("submit", (event) => { event.preventDefault(); void runPreflight(); });
     ["#subject-id", "#round"].forEach((selector) => $(selector).addEventListener("input", () => {
       draft.subject_id = $("#subject-id").value; draft.round = $("#round").value;
@@ -190,7 +190,7 @@
     });
     document.querySelectorAll("[data-command]").forEach((button) => button.addEventListener("click", async () => {
       button.disabled = true; clearNotice();
-      try { await api("command", {command:button.dataset.command}); notice(`已发送候选命令 ${button.dataset.command}，请观察设备数据并由实验负责人核对含义。`, ""); }
+      try { await api("command", {command:button.dataset.command}); notice(button.dataset.command === "b" ? "已发送小写 b；显示正常接收并完成准备后，请点击“开始 30 秒基线采集”。" : `已发送命令 ${button.dataset.command}，请观察设备数据。`, ""); }
       catch (error) { notice(error.message); } finally { if (button.isConnected) button.disabled = false; }
     }));
   }

@@ -2,7 +2,7 @@
 
 每个 session 表示一个被试、一个 round 的独立采集尝试，只有 `eeg_raw.csv`、`labels.csv`、`config.json` 三个正式结果文件。当前协议 `earwise-3round-4trial-randomstart-v4` 共 3 轮，每轮 4 个 trial（2 个 attention、2 个 relax）和 4 次量表，开头仅一次 30 秒基线。随机决定首个条件，之后交替，因此只有 attention → relax → attention → relax 和 relax → attention → relax → attention 两种顺序。三轮合计 3 次基线、12 个 trial（6 个 attention、6 个 relax）和 12 份量表。可按每天一轮安排实验，轮次不代表日历日期，也不要求连续三天采集。`mode=simulation` 的模拟记录位于 `simulation_data`；`mode=real` 的真实记录位于 `data`。两类数据不能合并当作同一实验来源。
 
-软件版本为 `1.3.0`，新会话数据字段 `schema_version` 为 `2.0`；素材清单 manifest schema 为 `4.0`，输入配置 `config/settings.json` 的 schema 仍为 `1.0`。界面、API、素材清单、CSV 和 JSON 统一使用 `round=1–3`；新会话不含 `day` 字段。保存路径为 `data/sub_001/round_01/<session_id>/`（模拟时根目录为 `simulation_data`），所选轮次决定 `round_01/02/03`，不再有 `day_XX` 层。所有旧协议数据均不迁移、不覆盖，也不计入当前协议的既往尝试；只有遗留未完成会话会按原格式追加中断收尾，旧表头不变。分析时必须结合 `schema_version`、`experiment_protocol_id` 与 `trials` 区分新旧记录。
+软件版本为 `1.3.1`，新会话数据字段 `schema_version` 为 `2.0`；素材清单 manifest schema 为 `4.0`，输入配置 `config/settings.json` 的 schema 仍为 `1.0`。界面、API、素材清单、CSV 和 JSON 统一使用 `round=1–3`；新会话不含 `day` 字段。保存路径为 `data/sub_001/round_01/<session_id>/`（模拟时根目录为 `simulation_data`），所选轮次决定 `round_01/02/03`，不再有 `day_XX` 层。所有旧协议数据均不迁移、不覆盖，也不计入当前协议的既往尝试；只有遗留未完成会话会按原格式追加中断收尾，旧表头不变。分析时必须结合 `schema_version`、`experiment_protocol_id` 与 `trials` 区分新旧记录。
 
 CSV 使用 UTF-8、固定表头、标准双引号转义和 `.` 小数点。不适用或未知值为空字段；JSON 对应值为 `null`。时间均含单位，UTC 字符串带时区。三文件的 `session_id`、`subject_id`、`round` 一致；两份 CSV 的前三列依次为 `session_id,subject_id,round`。
 
@@ -28,7 +28,7 @@ CSV 使用 UTF-8、固定表头、标准双引号转义和 `.` 小数点。不�
 | `frame_status` | 字符串 | `normal`、`duplicate`、`sequence_ambiguous` 等；可解码重复帧仍保存 |
 | `original_frame_hex` | 66 个十六进制字符 | 原始 33 字节帧，便于追溯，不另存 `.bin` |
 
-同一次 BLE 通知可能解出多个帧，接收时刻可以相同。接收时间不等于设备采样时间。`channel_0/1` 始终代表物理原始通道，左右耳含义查本次 `config.json.channel_mapping`，不依赖界面卡片顺序。
+同一次 BLE 通知可能解出多个帧，接收时刻可以相同。接收时间不等于设备采样时间。`channel_0/1` 始终代表物理原始通道，左右耳含义查本次 `config.json.channel_mapping`，不依赖界面卡片顺序。映射未确认时，两个映射值保持 `null`，仍正常保存两路原始数据，不推断左右耳。当前名义采样率由实验负责人确认为每通道 250 Hz；它不等于每秒 BLE 通知次数，也不表示软件已实测确认。μV 换算未验证时保持空字段，不用候选比例代替已确认的物理单位。
 
 ## labels.csv
 
@@ -106,7 +106,7 @@ CSV 使用 UTF-8、固定表头、标准双引号转义和 `.` 小数点。不�
 
 | 字段或分组 | 内容 |
 |---|---|
-| `schema_version/software_version/python_version/platform` | 三文件格式、软件和运行环境版本；当前数据字段 schema 2.0、软件 1.3.0 |
+| `schema_version/software_version/python_version/platform` | 三文件格式、软件和运行环境版本；当前数据字段 schema 2.0、软件 1.3.1 |
 | `experiment_protocol_id` | 当前为 `earwise-3round-4trial-randomstart-v4`；区分所有旧协议，避免把旧 day/round 记录直接当作新 round 记录 |
 | `dependency_versions` | 运行时 Tornado、Bleak 实际安装版本；完整开发环境见项目 requirements-lock.txt |
 | `session_id/subject_id/round` | 本次身份，subject_id 为保留前导零的字符串，round 为 1–3；新会话没有 day 字段 |
@@ -124,8 +124,8 @@ CSV 使用 UTF-8、固定表头、标准双引号转义和 `.` 小数点。不�
 | `audio_confirmed` | 操作人已在本页面确认视频声音可听见、音量合适 |
 | `target_name/service_uuid/notify_uuid/write_uuid/commands` | BLE 目标及候选或已核对命令，保留大小写 |
 | `protocol` | 帧长度、字节边界、序号、原始通道偏移、位序和 CRC 验证状态 |
-| `nominal_sample_rate/validations` | 名义采样率及命令、采样率、饱和定义验证标志 |
-| `channel_mapping` | channel_0/1 对应左右及 verified；未确认值 null |
+| `nominal_sample_rate/validations` | 实验负责人确认名义采样率为 250 Hz；命令、采样率实测、饱和定义的验证标志如实保存，未验证不阻止采集 |
+| `channel_mapping` | channel_0/1 对应左右及 verified；未确认值 null、verified=false，不阻止保存原始数据 |
 | `adc_bits/candidate_adc_gain/uv_scale/uv_unit/uv_verified` | ADC 位数、候选增益、候选换算及验证状态；候选不等于实测 |
 | `window_seconds/saturation_ratio/sequence_max_delta/sequence_trust_seconds/algorithm_versions` | 质量窗口、阈值与连续性判据 |
 | `data_timeout_seconds/page_heartbeat_seconds/video_timeout_seconds` | 数据、页面、视频中断门槛 |
@@ -136,6 +136,8 @@ CSV 使用 UTF-8、固定表头、标准双引号转义和 `.` 小数点。不�
 | `summary` | 实际行数、事件数、接收/唯一/重复/推定缺帧/歧义计数、量表提交数等结束摘要 |
 
 评分的唯一权威来源为 `labels.csv` 的 `RATING_SUBMITTED`，`trials` 只标记提交状态。当前协议正常完成时恰好有四条评分，逐一对应四个不同的 `trial_id`。分析前检查 `session_status`：`completed` 才是已通过软件保存完整性校验的正常全轮；其他状态保留的是未完成或保存异常记录。任何状态都不能替代人工实验质量判断。
+
+左右耳映射、命令、采样率和 ADC 饱和定义的验证标志只说明参数核对状态，不再作为开始采集的门槛。手动发送小写 `b`、接收到有效数据或完成整轮采集，都不会自动把这些标志改成 `true`。`validations.commands_verified` 仍控制连接时是否自动发送配置命令；为 `false` 时可在联调区手动发送 `b` 启动数据流。`validations.sample_rate_verified=false` 表示尚未独立实测采样率，不否定负责人提供的 250 Hz 名义值。`validations.saturation_verified=false` 时饱和率仍按配置阈值估计，供质量提示使用；`uv_verified=false` 时 CSV 的两个 μV 字段仍为空。分析时应保留并使用本次快照中的这些状态，而不是将 `completed` 解释为所有硬件参数均已验证。
 
 ### randomization 与实际播放计划
 
